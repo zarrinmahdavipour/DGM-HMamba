@@ -78,6 +78,7 @@ def demo_config(args):
     if args.weight_decay is not None:
         cfg.weight_decay = args.weight_decay
     cfg.dadge.bypass_enhancement = args.no_diffusion
+    cfg.dadge.deterministic_sampling = args.ddim
     if args.lambda_gcl is not None:
         cfg.loss.lambda_gcl = args.lambda_gcl
     return cfg
@@ -137,6 +138,8 @@ def parse_args():
     p.add_argument("--val-every", type=int, default=0,
                    help="validate every N Stage-2 episodes (needs --val-fraction)")
     p.add_argument("--lambda-gcl", type=float, default=None, help="default: config (0.1)")
+    p.add_argument("--ddim", action="store_true",
+                   help="deterministic DDIM reverse chain for the enhancement")
     p.add_argument("--ema", type=float, default=0.0,
                    help="EMA decay for Stage-2 weights (0 = off); the EMA weights are evaluated")
     p.add_argument("--select-on-val", action="store_true",

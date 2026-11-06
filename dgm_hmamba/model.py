@@ -50,6 +50,7 @@ class DGMHMamba(nn.Module):
     def _enhance(self, x0, num_inference_steps=None, ddim=False):
         if self.cfg.dadge.bypass_enhancement:
             return x0, torch.zeros_like(x0)
+        ddim = ddim or self.cfg.dadge.deterministic_sampling
         x_hat, eps_hat, _ = self.dadge.enhance(x0, num_steps=num_inference_steps, ddim=ddim)
         if self.cfg.dadge.straight_through and torch.is_grad_enabled() and x0.requires_grad:
             x_hat = x_hat + (x0 - x0.detach())

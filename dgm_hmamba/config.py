@@ -23,6 +23,9 @@ class DADGEConfig:
     # Ablation "w/o Diff": skip the reverse diffusion and feed X_0 (with a
     # zero noise map) to HDPM. The denoiser is still trained with L_diff.
     bypass_enhancement: bool = False
+    # Use the deterministic DDIM update (no fresh noise per step) for the
+    # enhancement reverse chain instead of ancestral DDPM sampling.
+    deterministic_sampling: bool = False
     # Pass the gradient of the downstream losses (L_cls, L_epi) through the
     # enhancement to the band projections with a straight-through estimator
     # (identity Jacobian), so the per-sensor projections are trained by
