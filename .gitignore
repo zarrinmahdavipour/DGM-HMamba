@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Data, runs and checkpoints (never commit datasets or large weights)
+/data/
+/data_synthetic/
+/runs/
+*.pt
+*.pth
+*.mat
+*.part
+
+# Manuscript material does not belong in this repository
+*.tex
+*.pdf
+*.bib
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
