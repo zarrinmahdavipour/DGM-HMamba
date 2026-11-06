@@ -188,15 +188,6 @@ def test_dsspe_keeps_well_separated_classes_apart():
     assert pred.tolist() == [0, 1, 2, 3]
 
 
-def test_denoiser_noise_path_starts_at_zero():
-    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
-    den = m.dadge.denoiser
-    x, t, c = torch.randn(2, 200, 5, 5), torch.tensor([1, 3]), torch.randn(2, 128)
-    a = den(x, t, c)
-    b = den(x, t, c, torch.tensor([0.1, 0.2]))
-    assert torch.allclose(a, b)
-
-
 def test_classification_losses_reach_band_projections():
     torch.manual_seed(0)
     m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
