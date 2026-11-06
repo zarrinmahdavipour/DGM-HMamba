@@ -1,1 +1,1 @@
---val-fraction 0.1
+--val-fraction 0.1 --no-diffusion
