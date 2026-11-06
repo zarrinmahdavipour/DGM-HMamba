@@ -57,6 +57,8 @@ def main():
     print(f"Looking for datasets under: {root.resolve()}\n")
 
     ok = 0
+    failed_requested = []
+    requested = set(args.download or (sorted(DOWNLOAD_URLS) if args.download is not None else []))
     for name in DATASETS:
         try:
             ds = get_dataset(name, root)
@@ -64,8 +66,12 @@ def main():
             ok += 1
         except FileNotFoundError:
             print(f"  [missing] {name:13s}")
+            if name in requested:
+                failed_requested.append(name)
         except Exception as e:
             print(f"  [error]   {name:13s} {type(e).__name__}: {e}")
+            if name in requested:
+                failed_requested.append(name)
 
     print(f"\n{ok}/{len(DATASETS)} datasets ready.")
     if ok == 0:
@@ -73,6 +79,8 @@ def main():
             "\nNo datasets found. Run with --download, or place the .mat files in the "
             "folders listed in the docstring of this script."
         )
+    if failed_requested:
+        sys.exit(f"Requested datasets could not be loaded: {', '.join(failed_requested)}")
 
 
 if __name__ == "__main__":
