@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.utils.checkpoint import checkpoint
+
 from .mamba_block import MambaBlock
 from ..config import HDPMConfig
 
@@ -55,8 +57,10 @@ class LevelPaths(nn.Module):
         state_dim: int,
         expand_factor: int,
         conv_kernel: int,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
+        self.grad_checkpoint = grad_checkpoint
         self.spectral_blocks = nn.ModuleList(
             [MambaBlock(d_level, state_dim, expand_factor, conv_kernel) for _ in range(blocks_per_level)]
         )
@@ -86,7 +90,7 @@ class LevelPaths(nn.Module):
             gamma = gamma.unsqueeze(1).expand(B, N_l, d).reshape(B * N_l, 1, d)
             beta = beta.unsqueeze(1).expand(B, N_l, d).reshape(B * N_l, 1, d)
             spec = gamma * spec + beta
-            spec = blk(spec)
+            spec = self._run(blk, spec)
         spec = spec.reshape(B, N_l, C, d)
         spec_summary = spec.mean(dim=2)  # (B, N_l, d)
 
@@ -97,10 +101,15 @@ class LevelPaths(nn.Module):
             gamma = gamma.unsqueeze(1)
             beta = beta.unsqueeze(1)
             spat = gamma * spat + beta
-            spat = blk(spat)
+            spat = self._run(blk, spat)
 
         fused = self.cpi(spec_summary, spat) + spat
         return fused, spec
+
+    def _run(self, blk, x):
+        if self.grad_checkpoint and torch.is_grad_enabled() and x.requires_grad:
+            return checkpoint(blk, x, use_reentrant=False)
+        return blk(x)
 
 
 class PatchMerge(nn.Module):
@@ -146,6 +155,7 @@ class HDPM(nn.Module):
                     cfg.state_dim,
                     cfg.expand_factor,
                     cfg.conv_kernel,
+                    cfg.grad_checkpoint,
                 )
             )
 

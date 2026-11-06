@@ -198,3 +198,20 @@ def test_classification_losses_reach_band_projections():
     l_cls.backward()
     assert m.source_band_proj.proj.weight.grad is not None
     assert m.dadge.denoiser.out_conv.weight.grad is None
+
+
+def test_gradient_checkpointing_gives_same_gradients():
+    torch.manual_seed(0)
+    cfg = tiny_cfg()
+    m1 = DGMHMamba(cfg, source_bands=12, target_bands=8, num_source_classes=4)
+    cfg2 = tiny_cfg(); cfg2.hdpm.grad_checkpoint = True
+    m2 = DGMHMamba(cfg2, source_bands=12, target_bands=8, num_source_classes=4)
+    m2.load_state_dict(m1.state_dict())
+    x = torch.randn(2, 200, 5, 5)
+    eps = torch.randn(2, 200, 5, 5)
+    for m in (m1, m2):
+        m.zero_grad()
+        m.hdpm(x, eps).sum().backward()
+    g1 = m1.hdpm.levels[0].spectral_blocks[0].in_proj.weight.grad
+    g2 = m2.hdpm.levels[0].spectral_blocks[0].in_proj.weight.grad
+    assert torch.allclose(g1, g2, atol=1e-5)

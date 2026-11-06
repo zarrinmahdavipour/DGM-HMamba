@@ -70,6 +70,7 @@ def demo_config(args):
     cfg.hdpm.state_dim = args.state_dim
     cfg.hdpm.expand_factor = args.expand
     cfg.hdpm.patch_size = args.patch_size
+    cfg.hdpm.grad_checkpoint = args.grad_checkpoint
     if args.stage1_lr is not None:
         cfg.stage1_lr = args.stage1_lr
     if args.stage2_lr is not None:
@@ -120,6 +121,8 @@ def parse_args():
     p.add_argument("--expand", type=int, default=1)
     p.add_argument("--denoiser-ch", type=int, default=32)
     p.add_argument("--T", type=int, default=10, help="diffusion timesteps")
+    p.add_argument("--grad-checkpoint", action="store_true",
+                   help="recompute Mamba blocks in the backward pass (saves memory)")
     # optimisation
     p.add_argument("--stage1-lr", type=float, default=None, help="default: config (1e-3)")
     p.add_argument("--stage2-lr", type=float, default=None, help="default: config (1e-4)")

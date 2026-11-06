@@ -40,6 +40,9 @@ class HDPMConfig:
 
     expand_factor: int = 2
     conv_kernel: int = 4
+    # Recompute each Mamba block in the backward pass instead of storing the
+    # scan states (same results, much less memory, ~30 % more compute).
+    grad_checkpoint: bool = False
 
 
 @dataclass
