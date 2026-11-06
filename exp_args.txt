@@ -1,0 +1,1 @@
+--val-fraction 0.1 --val-episodes 40 --val-every 100 --select-on-val --schedule cosine --warmup-frac 0.05 --stage1-iters 300 --stage2-steps 600 --stage2-lr 1e-3 --train-query 10 --train-way 5 --augment
