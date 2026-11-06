@@ -71,7 +71,10 @@ class DGMHMamba(nn.Module):
         f_source = self.hdpm(x_hat_s, eps_hat_s)
 
         l_cls = source_classification_loss(self.source_head, f_source, y_source)
-        l_diff = self.dadge.diffusion_loss(x0_source, c_for_diff)
+        # X_0 is detached as well: otherwise the band projection could minimise
+        # L_diff trivially by shrinking X_0 towards zero (then X_t is pure noise
+        # and the noise is perfectly predictable), destroying the input signal.
+        l_diff = self.dadge.diffusion_loss(x0_source.detach(), c_for_diff)
         l_adv = self.dadge.adversarial_loss(x0_source, x0_target_unlabeled, lambda_grl)
         return l_cls, l_diff, l_adv
 
@@ -94,7 +97,9 @@ class DGMHMamba(nn.Module):
             f_support, support_labels, n_way, semantic_anchors
         )
         cos_logits = self.dsspe.classify(f_query, prototypes)
-        l_epi = episodic_loss(cos_logits, query_labels)
+        l_epi = episodic_loss(
+            cos_logits, query_labels, temperature=1.0 / self.cfg.dsspe.logit_scale
+        )
         l_gcl = graph_contrastive_loss(
             self.dsspe.graph_encoder,
             f_support,

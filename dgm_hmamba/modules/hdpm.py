@@ -15,6 +15,13 @@ class ModulationHead(nn.Module):
     def __init__(self, c_in: int, d_level: int):
         super().__init__()
         self.proj = nn.Linear(c_in, 2 * d_level)
+        # Eq. (modulation): u' = gamma * u + beta. Initialise the bias so that
+        # gamma starts at 1 and beta at 0; with PyTorch's default bias init
+        # gamma would start near 0 and every block would scale its input
+        # down to almost nothing.
+        with torch.no_grad():
+            self.proj.bias.zero_()
+            self.proj.bias[:d_level].fill_(1.0)
 
     def forward(self, eps_bar: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         gamma, beta = self.proj(eps_bar).chunk(2, dim=-1)

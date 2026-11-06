@@ -95,8 +95,13 @@ class ConditionalDenoiser(nn.Module):
         self.out_norm = nn.GroupNorm(8, base_ch)
         self.out_conv = nn.Conv2d(base_ch, C, 3, padding=1)
 
-        # FiLM-style modulation from time + condition
+        # FiLM-style modulation from time + condition, initialised to the
+        # identity (gamma = 1, beta = 0) so the residual stack starts intact.
         self.film = nn.Linear(base_ch * 4, base_ch * 2)
+        with torch.no_grad():
+            self.film.weight.zero_()
+            self.film.bias.zero_()
+            self.film.bias[:base_ch].fill_(1.0)
 
     def _timestep_embedding(self, t: torch.Tensor, dim: int) -> torch.Tensor:
         half = dim // 2

@@ -123,3 +123,52 @@ def test_data_pipeline_and_evaluation(tmp_path):
     assert out["n_episodes"] == 2
     assert 0.0 <= out["oa_mean"] <= 1.0 and 0.0 <= out["aa"] <= 1.0
     assert m.training  # evaluate_episodes restores the training mode
+
+
+def test_modulation_and_film_start_as_identity():
+    from dgm_hmamba.modules.hdpm import ModulationHead
+    head = ModulationHead(c_in=12, d_level=8)
+    gamma, beta = head(torch.zeros(2, 12))
+    assert torch.allclose(gamma, torch.ones_like(gamma))
+    assert torch.allclose(beta, torch.zeros_like(beta))
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    film = m.dadge.denoiser.film
+    assert torch.count_nonzero(film.weight) == 0
+    assert torch.allclose(film.bias[: film.out_features // 2], torch.ones(film.out_features // 2))
+
+
+def test_diffusion_loss_does_not_train_band_projection():
+    torch.manual_seed(0)
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    xs = m.project_bands(torch.randn(3, 12, 5, 5), is_source=True)
+    xt = m.project_bands(torch.randn(3, 8, 5, 5), is_source=False)
+    _, l_diff, _ = m.stage1_losses(xs, torch.tensor([0, 1, 2]), xt, lambda_grl=1.0)
+    m.zero_grad()
+    l_diff.backward()
+    assert m.source_band_proj.proj.weight.grad is None
+    assert m.dadge.denoiser.out_conv.weight.grad is not None
+
+
+def test_episodic_loss_uses_logit_scale():
+    from dgm_hmamba.losses import episodic_loss
+    cos = torch.tensor([[0.9, 0.1, 0.0]])
+    y = torch.tensor([0])
+    s = get_default_config().dsspe.logit_scale
+    assert episodic_loss(cos, y, temperature=1.0 / s) < episodic_loss(cos, y)
+
+
+def test_selective_scan_matches_reference_loop():
+    from dgm_hmamba.modules.mamba_block import MambaBlock
+    torch.manual_seed(0)
+    blk = MambaBlock(8, d_state=4, expand=1)
+    u, dt = torch.randn(2, 7, 8), torch.rand(2, 7, 8) * 0.1
+    A = -torch.exp(blk.A_log.float())
+    B, C = torch.randn(2, 7, 4), torch.randn(2, 7, 4)
+    y = blk._selective_scan(u, dt, A, B, C)
+    x = torch.zeros(2, 8, 4)
+    ref = []
+    for t in range(7):
+        x = torch.exp(dt[:, t].unsqueeze(-1) * A) * x + dt[:, t].unsqueeze(-1) * B[:, t].unsqueeze(1) * u[:, t].unsqueeze(-1)
+        ref.append((x * C[:, t].unsqueeze(1)).sum(-1))
+    ref = torch.stack(ref, 1) + u * blk.D
+    assert torch.allclose(y, ref, atol=1e-5)

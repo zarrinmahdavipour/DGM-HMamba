@@ -47,6 +47,11 @@ class DSSPEConfig:
     gnn_num_layers: int = 2
     edge_dropout_p: float = 0.2
     feature_noise_std: float = 0.05
+    # Scale s applied to the cosine logits in L_epi (softmax over s * cos).
+    # With s = 1 the logits lie in [-1, 1], the softmax is almost uniform and
+    # L_epi stays near ln N with very small gradients. Prediction (arg max)
+    # does not depend on s.
+    logit_scale: float = 10.0
 
 
 @dataclass
