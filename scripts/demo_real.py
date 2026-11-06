@@ -78,6 +78,8 @@ def demo_config(args):
     if args.weight_decay is not None:
         cfg.weight_decay = args.weight_decay
     cfg.dadge.bypass_enhancement = args.no_diffusion
+    if args.lambda_gcl is not None:
+        cfg.loss.lambda_gcl = args.lambda_gcl
     return cfg
 
 
@@ -134,6 +136,9 @@ def parse_args():
     p.add_argument("--augment", action="store_true", help="flips, rotations, scaling, noise")
     p.add_argument("--val-every", type=int, default=0,
                    help="validate every N Stage-2 episodes (needs --val-fraction)")
+    p.add_argument("--lambda-gcl", type=float, default=None, help="default: config (0.1)")
+    p.add_argument("--ema", type=float, default=0.0,
+                   help="EMA decay for Stage-2 weights (0 = off); the EMA weights are evaluated")
     p.add_argument("--select-on-val", action="store_true",
                    help="evaluate the Stage-2 checkpoint with the best validation OA")
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
@@ -296,10 +301,10 @@ def main():
     anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
     history = {"stage1": [], "stage2": [], "validation": {}}
 
-    def validate(tag):
+    def validate(tag, net=None):
         if val_y is None:
             return None
-        m = evaluate_episodes(model, val_x, val_y, n_way, args.k_shot, args.q_query, anchors,
+        m = evaluate_episodes(net or model, val_x, val_y, n_way, args.k_shot, args.q_query, anchors,
                               device, n_cls_t, n_episodes=args.val_episodes, seed=777 + args.seed)
         history["validation"][tag] = m["oa_mean"]
         print(f"  [validation, {tag}] {n_way}-way {args.k_shot}-shot {format_metrics(m)}", flush=True)
@@ -359,6 +364,7 @@ def main():
     index = ByClassIndex(tr_y.tolist())
     rng = random.Random(args.seed)
     best = (-1.0, None, 0)
+    ema_model = copy.deepcopy(model) if args.ema > 0 else None
     t0 = time.time()
     for step in range(1, args.stage2_steps + 1):
         for g in opt.param_groups:
@@ -379,6 +385,12 @@ def main():
         loss = total_objective_stage2(l_epi, l_gcl, cfg.loss)
         loss.backward()
         opt.step()
+        if ema_model is not None:
+            with torch.no_grad():
+                for pe, pm in zip(ema_model.parameters(), model.parameters()):
+                    pe.mul_(args.ema).add_(pm.detach(), alpha=1 - args.ema)
+                for be, bm in zip(ema_model.buffers(), model.buffers()):
+                    be.copy_(bm)
 
         acc = (logits.argmax(-1).cpu() == qy).float().mean().item()
         history["stage2"].append({"step": step, "l_epi": l_epi.item(),
@@ -389,11 +401,14 @@ def main():
                   f"train acc (last 25)={np.mean(recent)*100:5.1f}%  "
                   f"lr={opt.param_groups[0]['lr']:.2e}", flush=True)
         if args.val_every and step % args.val_every == 0 and step < args.stage2_steps:
-            v = validate(f"episode {step}")
+            net = ema_model or model
+            v = validate(f"episode {step}", net)
             if v is not None and v > best[0]:
-                best = (v, copy.deepcopy(model.state_dict()), step)
+                best = (v, copy.deepcopy(net.state_dict()), step)
     timings["stage2_s"] = time.time() - t0
     print(f"  Stage 2 done in {timings['stage2_s']:.0f} s")
+    if ema_model is not None:
+        model.load_state_dict(ema_model.state_dict())   # evaluate the EMA weights
     v = validate("after Stage 2")
     if v is not None and v > best[0]:
         best = (v, None, args.stage2_steps)
