@@ -195,3 +195,15 @@ def test_denoiser_noise_path_starts_at_zero():
     a = den(x, t, c)
     b = den(x, t, c, torch.tensor([0.1, 0.2]))
     assert torch.allclose(a, b)
+
+
+def test_classification_losses_reach_band_projections():
+    torch.manual_seed(0)
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    xs = m.project_bands(torch.randn(3, 12, 5, 5), is_source=True)
+    xt = m.project_bands(torch.randn(3, 8, 5, 5), is_source=False)
+    l_cls, _, _ = m.stage1_losses(xs, torch.tensor([0, 1, 2]), xt, lambda_grl=1.0)
+    m.zero_grad()
+    l_cls.backward()
+    assert m.source_band_proj.proj.weight.grad is not None
+    assert m.dadge.denoiser.out_conv.weight.grad is None

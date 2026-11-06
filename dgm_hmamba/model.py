@@ -51,6 +51,8 @@ class DGMHMamba(nn.Module):
         if self.cfg.dadge.bypass_enhancement:
             return x0, torch.zeros_like(x0)
         x_hat, eps_hat, _ = self.dadge.enhance(x0, num_steps=num_inference_steps, ddim=ddim)
+        if self.cfg.dadge.straight_through and torch.is_grad_enabled() and x0.requires_grad:
+            x_hat = x_hat + (x0 - x0.detach())
         return x_hat, eps_hat
 
     # ------------------------------------------------------------------
