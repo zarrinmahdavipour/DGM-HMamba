@@ -15,7 +15,7 @@ on:
 jobs:
   demo-real:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,7 +46,10 @@ jobs:
               if s["map_metrics"]:
                   mm = s["map_metrics"]
                   print(f"RESULT map: OA {mm['oa']*100:.2f}  AA {mm['aa']*100:.2f}  kappa {mm['kappa']:.4f}")
-              print("RESULT validation", s["history"].get("validation"))
+              h = s["history"]
+              print("RESULT validation", {k: round(v * 100, 2) for k, v in h.get("validation", {}).items()})
+              print("RESULT train acc (last 10% of episodes):", round(h.get("train_acc_last10pct", 0) * 100, 2),
+                    "| selected episode:", h.get("selected_episode"))
               print("RESULT timings", {k: round(v) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4

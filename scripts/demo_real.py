@@ -53,21 +53,41 @@ from dgm_hmamba.episodes import ByClassIndex, gather_episode
 from dgm_hmamba.evaluation import evaluate_episodes, format_metrics
 from dgm_hmamba.losses import total_objective_stage1, total_objective_stage2
 from dgm_hmamba.metrics import classification_report
+from dgm_hmamba.augment import augment_patches
+import copy
+import math
 
 
-def demo_config(patch_size: int):
+def demo_config(args):
     """Small configuration for the demo (paper configuration: see config.py)."""
     cfg = get_default_config()
-    cfg.dadge.T = 10
-    cfg.dadge.default_inference_steps = 10      # = T (full reverse chain)
-    cfg.dadge.denoiser_base_channels = 32
+    cfg.dadge.T = args.T
+    cfg.dadge.default_inference_steps = args.T  # full reverse chain
+    cfg.dadge.denoiser_base_channels = args.denoiser_ch
     cfg.dadge.denoiser_num_res_blocks = 1
-    cfg.hdpm.widths = (32, 32, 32)
-    cfg.hdpm.blocks_per_level = 1
-    cfg.hdpm.state_dim = 4
-    cfg.hdpm.expand_factor = 1
-    cfg.hdpm.patch_size = patch_size
+    cfg.hdpm.widths = tuple(int(w) for w in args.widths.split(","))
+    cfg.hdpm.blocks_per_level = args.blocks_per_level
+    cfg.hdpm.state_dim = args.state_dim
+    cfg.hdpm.expand_factor = args.expand
+    cfg.hdpm.patch_size = args.patch_size
+    if args.stage1_lr is not None:
+        cfg.stage1_lr = args.stage1_lr
+    if args.stage2_lr is not None:
+        cfg.stage2_lr = args.stage2_lr
+    if args.weight_decay is not None:
+        cfg.weight_decay = args.weight_decay
+    cfg.dadge.bypass_enhancement = args.no_diffusion
     return cfg
+
+
+def lr_factor(step: int, total: int, warmup: int, schedule: str) -> float:
+    """Linear warm-up, then constant or cosine decay (to 5 % of the base rate)."""
+    if warmup > 0 and step <= warmup:
+        return step / warmup
+    if schedule == "cosine":
+        prog = (step - warmup) / max(1, total - warmup)
+        return 0.05 + 0.95 * 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
+    return 1.0
 
 
 def parse_args():
@@ -93,6 +113,26 @@ def parse_args():
     p.add_argument("--val-episodes", type=int, default=30)
     p.add_argument("--no-diffusion", action="store_true",
                    help='ablation "w/o Diff": feed X_0 to HDPM without reverse diffusion')
+    # model size
+    p.add_argument("--widths", default="32,32,32", help="HDPM widths d1,d2,d3")
+    p.add_argument("--blocks-per-level", type=int, default=1)
+    p.add_argument("--state-dim", type=int, default=4)
+    p.add_argument("--expand", type=int, default=1)
+    p.add_argument("--denoiser-ch", type=int, default=32)
+    p.add_argument("--T", type=int, default=10, help="diffusion timesteps")
+    # optimisation
+    p.add_argument("--stage1-lr", type=float, default=None, help="default: config (1e-3)")
+    p.add_argument("--stage2-lr", type=float, default=None, help="default: config (1e-4)")
+    p.add_argument("--weight-decay", type=float, default=None, help="default: config (1e-2)")
+    p.add_argument("--schedule", choices=["constant", "cosine"], default="constant")
+    p.add_argument("--warmup-frac", type=float, default=0.0)
+    p.add_argument("--train-way", type=int, default=None, help="classes per training episode")
+    p.add_argument("--train-query", type=int, default=None, help="queries per class in training")
+    p.add_argument("--augment", action="store_true", help="flips, rotations, scaling, noise")
+    p.add_argument("--val-every", type=int, default=0,
+                   help="validate every N Stage-2 episodes (needs --val-fraction)")
+    p.add_argument("--select-on-val", action="store_true",
+                   help="evaluate the Stage-2 checkpoint with the best validation OA")
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
     p.add_argument("--map-batch", type=int, default=None,
                    help="patches per forward pass for the map (default 128 on GPU, 64 on CPU)")
@@ -216,8 +256,7 @@ def main():
     t0 = time.time()
     src_ds = get_dataset(args.source, args.data_root)
     tgt_ds = get_dataset(args.target, args.data_root)
-    cfg = demo_config(args.patch_size)
-    cfg.dadge.bypass_enhancement = args.no_diffusion
+    cfg = demo_config(args)
     split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=args.seed)
 
     src_x = torch.from_numpy(split["source_patches"])
@@ -247,7 +286,8 @@ def main():
     model = DGMHMamba(cfg, src_ds.n_bands, tgt_ds.n_bands, len(split["source_classes"])).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"  Demo model: {n_params/1e6:.3f} M trainable parameters "
-          f"(widths {cfg.hdpm.widths}, T={cfg.dadge.T}, {args.patch_size}×{args.patch_size} patches)\n")
+          f"(widths {cfg.hdpm.widths}, T={cfg.dadge.T}, {args.patch_size}×{args.patch_size} patches)")
+    print(f"  Settings: {vars(args)}\n")
 
     # Placeholder semantic anchors (GloVe class-name anchors not implemented yet)
     anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
@@ -255,11 +295,15 @@ def main():
 
     def validate(tag):
         if val_y is None:
-            return
+            return None
         m = evaluate_episodes(model, val_x, val_y, n_way, args.k_shot, args.q_query, anchors,
                               device, n_cls_t, n_episodes=args.val_episodes, seed=777 + args.seed)
         history["validation"][tag] = m["oa_mean"]
-        print(f"  [validation, {tag}] {n_way}-way {args.k_shot}-shot {format_metrics(m)}")
+        print(f"  [validation, {tag}] {n_way}-way {args.k_shot}-shot {format_metrics(m)}", flush=True)
+        return m["oa_mean"]
+
+    def maybe_augment(x):
+        return augment_patches(x) if args.augment else x
 
     # --------------------------------------------------------------- stage 1
     print("=" * 64)
@@ -267,15 +311,18 @@ def main():
     print("=" * 64)
     opt = AdamW(model.parameters(), lr=cfg.stage1_lr, weight_decay=cfg.weight_decay)
     warmup = max(1, int(0.15 * args.stage1_iters))   # paper: λ_grl ramps over 30 of 200 epochs
+    lr_warm1 = int(args.warmup_frac * args.stage1_iters)
     gen = torch.Generator().manual_seed(args.seed)
     model.train()
     t0 = time.time()
     for it in range(1, args.stage1_iters + 1):
         lambda_grl = min(1.0, it / warmup)
+        for g in opt.param_groups:
+            g["lr"] = cfg.stage1_lr * lr_factor(it, args.stage1_iters, lr_warm1, args.schedule)
         si = torch.randint(len(src_y), (args.batch_size,), generator=gen)
         ti = torch.randint(len(tr_y), (args.batch_size,), generator=gen)   # unlabeled target
-        x0_s = model.project_bands(src_x[si].to(device), is_source=True)
-        x0_t = model.project_bands(tr_x[ti].to(device), is_source=False)
+        x0_s = model.project_bands(maybe_augment(src_x[si].to(device)), is_source=True)
+        x0_t = model.project_bands(maybe_augment(tr_x[ti].to(device)), is_source=False)
 
         opt.zero_grad(set_to_none=True)
         l_cls, l_diff, l_adv = model.stage1_losses(x0_s, src_y[si].to(device), x0_t, lambda_grl)
@@ -300,23 +347,30 @@ def main():
     print(f"STAGE 2 – {n_way}-way {args.k_shot}-shot episodic meta-training on P_t^tr "
           f"({args.stage2_steps} episodes)")
     print("=" * 64)
-    for g in opt.param_groups:
-        g["lr"] = cfg.stage2_lr
+    opt = AdamW(model.parameters(), lr=cfg.stage2_lr, weight_decay=cfg.weight_decay)
+    lr_warm2 = int(args.warmup_frac * args.stage2_steps)
+    train_way = min(args.train_way or n_way, n_cls_t)
+    train_query = args.train_query or args.q_query
+    print(f"  training episodes: {train_way}-way {args.k_shot}-shot {train_query}-query, "
+          f"lr {cfg.stage2_lr:g} ({args.schedule}, warm-up {lr_warm2}), augment={args.augment}")
     index = ByClassIndex(tr_y.tolist())
     rng = random.Random(args.seed)
+    best = (-1.0, None, 0)
     t0 = time.time()
     for step in range(1, args.stage2_steps + 1):
+        for g in opt.param_groups:
+            g["lr"] = cfg.stage2_lr * lr_factor(step, args.stage2_steps, lr_warm2, args.schedule)
         try:
-            s_idx, q_idx, ep_classes = index.sample_episode(n_way, args.k_shot, args.q_query, rng)
+            s_idx, q_idx, ep_classes = index.sample_episode(train_way, args.k_shot, train_query, rng)
         except ValueError:
             continue
         sx, sy, qx, qy = gather_episode(tr_x, tr_y, s_idx, q_idx, ep_classes)
-        sx0 = model.project_bands(sx.to(device), is_source=False)
-        qx0 = model.project_bands(qx.to(device), is_source=False)
+        sx0 = model.project_bands(maybe_augment(sx.to(device)), is_source=False)
+        qx0 = model.project_bands(maybe_augment(qx.to(device)), is_source=False)
 
         opt.zero_grad(set_to_none=True)
         l_epi, l_gcl, logits = model.stage2_episode(
-            sx0, sy.to(device), qx0, qy.to(device), n_way,
+            sx0, sy.to(device), qx0, qy.to(device), train_way,
             anchors[torch.as_tensor(ep_classes, dtype=torch.long)].to(device)
         )
         loss = total_objective_stage2(l_epi, l_gcl, cfg.loss)
@@ -326,12 +380,26 @@ def main():
         acc = (logits.argmax(-1).cpu() == qy).float().mean().item()
         history["stage2"].append({"step": step, "l_epi": l_epi.item(),
                                   "l_gcl": l_gcl.item(), "acc": acc})
-        if step == 1 or step % 10 == 0 or step == args.stage2_steps:
+        if step == 1 or step % 25 == 0 or step == args.stage2_steps:
+            recent = [h["acc"] for h in history["stage2"][-25:]]
             print(f"  episode {step:4d} | L_epi={l_epi.item():.3f} L_gcl={l_gcl.item():.3f} "
-                  f"query acc={acc*100:5.1f}%")
+                  f"train acc (last 25)={np.mean(recent)*100:5.1f}%  "
+                  f"lr={opt.param_groups[0]['lr']:.2e}", flush=True)
+        if args.val_every and step % args.val_every == 0 and step < args.stage2_steps:
+            v = validate(f"episode {step}")
+            if v is not None and v > best[0]:
+                best = (v, copy.deepcopy(model.state_dict()), step)
     timings["stage2_s"] = time.time() - t0
     print(f"  Stage 2 done in {timings['stage2_s']:.0f} s")
-    validate("after Stage 2")
+    v = validate("after Stage 2")
+    if v is not None and v > best[0]:
+        best = (v, None, args.stage2_steps)
+    if args.select_on_val and best[1] is not None:
+        model.load_state_dict(best[1])
+        print(f"  using the checkpoint from episode {best[2]} (best validation OA {best[0]*100:.2f}%)")
+    history["selected_episode"] = best[2]
+    n_tail = max(1, len(history["stage2"]) // 10)
+    history["train_acc_last10pct"] = float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
     print()
 
     # ------------------------------------------------------------ evaluation
