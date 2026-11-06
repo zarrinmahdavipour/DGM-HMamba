@@ -113,13 +113,14 @@ class MambaBlock(nn.Module):
         deltaA = torch.exp(dt.unsqueeze(-1) * A)          # broadcast
         deltaB_u = dt.unsqueeze(-1) * B.unsqueeze(2) * u.unsqueeze(-1)
 
-        # Sequential scan
+        # Sequential scan. unbind() splits the time axis once; indexing
+        # deltaA[:, t] inside the loop would make autograd allocate a
+        # full-size (B, L, D, N) gradient buffer for every step (O(L^2) work).
         x = torch.zeros(Bsz, D, N, device=u.device, dtype=u.dtype)
         ys = []
-        for t in range(L):
-            x = deltaA[:, t] * x + deltaB_u[:, t]
-            y_t = (x * C[:, t].unsqueeze(1)).sum(-1)      # (B, D)
-            ys.append(y_t)
+        for dA_t, dBu_t, C_t in zip(deltaA.unbind(1), deltaB_u.unbind(1), C.unbind(1)):
+            x = dA_t * x + dBu_t
+            ys.append((x * C_t.unsqueeze(1)).sum(-1))    # (B, D)
         y = torch.stack(ys, dim=1)                        # (B, L, D)
         y = y + u * self.D
         return y
