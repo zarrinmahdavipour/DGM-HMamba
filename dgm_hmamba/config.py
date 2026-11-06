@@ -20,6 +20,9 @@ class DADGEConfig:
     denoiser_base_channels: int = 64
     denoiser_num_res_blocks: int = 2
     default_inference_steps: int = 50
+    # Ablation "w/o Diff": skip the reverse diffusion and feed X_0 (with a
+    # zero noise map) to HDPM. The denoiser is still trained with L_diff.
+    bypass_enhancement: bool = False
 
 
 @dataclass

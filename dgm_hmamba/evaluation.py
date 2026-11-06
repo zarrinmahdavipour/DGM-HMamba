@@ -55,7 +55,7 @@ def evaluate_episodes(
             support_y.to(device),
             query_x0,
             n_way,
-            anchors[:n_way].to(device),
+            anchors[torch.as_tensor(ep_classes, dtype=torch.long)].to(device),
         ).cpu()
         accs.append((preds == query_y).float().mean().item())
         # map episode labels 0..N-1 back to pool class ids

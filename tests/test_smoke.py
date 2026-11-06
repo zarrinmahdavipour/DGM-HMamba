@@ -79,7 +79,8 @@ def test_stage2_episode_and_prediction(model):
     model.zero_grad()
     loss.backward()
     assert logits.shape == (n_way * q, n_way)
-    assert model.dsspe.anchor_proj.weight.grad is not None
+    assert model.dsspe.fusion_logits.grad is not None
+    assert model.dsspe.anchor_proj.weight.grad is None  # Proj is frozen during episodes
     pred = model.predict_episode(sx.detach(), sy, qx.detach(), n_way, anchors)
     assert pred.shape == (n_way * q,) and int(pred.max()) < n_way
     zs = model.predict_zero_shot(qx.detach(), anchors)
@@ -172,3 +173,25 @@ def test_selective_scan_matches_reference_loop():
         ref.append((x * C[:, t].unsqueeze(1)).sum(-1))
     ref = torch.stack(ref, 1) + u * blk.D
     assert torch.allclose(y, ref, atol=1e-5)
+
+
+def test_dsspe_keeps_well_separated_classes_apart():
+    from dgm_hmamba.modules.dsspe import DSSPE
+    torch.manual_seed(0)
+    cfg = get_default_config().dsspe
+    dsspe = DSSPE(cfg, d_model=16)
+    centres = torch.eye(16)[:4] * 3.0
+    support = centres.repeat_interleave(2, 0) + 0.05 * torch.randn(8, 16)
+    labels = torch.arange(4).repeat_interleave(2)
+    protos = dsspe.evolve(support, labels, 4, torch.randn(4, cfg.anchor_glove_dim))
+    pred = dsspe.classify(centres + 0.05 * torch.randn(4, 16), protos).argmax(-1)
+    assert pred.tolist() == [0, 1, 2, 3]
+
+
+def test_denoiser_noise_path_starts_at_zero():
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    den = m.dadge.denoiser
+    x, t, c = torch.randn(2, 200, 5, 5), torch.tensor([1, 3]), torch.randn(2, 128)
+    a = den(x, t, c)
+    b = den(x, t, c, torch.tensor([0.1, 0.2]))
+    assert torch.allclose(a, b)

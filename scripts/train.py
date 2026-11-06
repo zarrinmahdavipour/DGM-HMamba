@@ -267,7 +267,7 @@ def main():
     n_way = min(args.n_way, n_target_classes)
     # NOTE: placeholder anchors. GloVe class-name anchors are not implemented
     # yet (see README, "Known differences from the manuscript").
-    anchors = torch.randn(n_way, cfg.dsspe.anchor_glove_dim)
+    anchors = torch.randn(n_target_classes, cfg.dsspe.anchor_glove_dim)  # one row per class
 
     # ------------------------------------------------------------------
     # Model & optimiser
@@ -406,7 +406,7 @@ def main():
         support_x, support_y, query_x, query_y = gather_episode(
             tgt_tr_x, tgt_tr_y, s_idx, q_idx, ep_classes
         )
-        ep_anchors = anchors[:n_way]
+        ep_anchors = anchors[torch.as_tensor(ep_classes, dtype=torch.long)]
 
         support_x0 = model.project_bands(support_x.to(device), is_source=False)
         query_x0 = model.project_bands(query_x.to(device), is_source=False)

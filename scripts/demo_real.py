@@ -46,6 +46,7 @@ from dgm_hmamba.data import (
     download_dataset,
     get_dataset,
     make_cross_domain_split,
+    split_validation,
 )
 from dgm_hmamba.data.datasets import CLASS_NAMES
 from dgm_hmamba.episodes import ByClassIndex, gather_episode
@@ -85,6 +86,13 @@ def parse_args():
     p.add_argument("--k-shot", type=int, default=5)
     p.add_argument("--q-query", type=int, default=15)
     p.add_argument("--eval-episodes", type=int, default=50)
+    p.add_argument("--val-fraction", type=float, default=0.0,
+                   help="hold out this fraction of each class of the meta-training pool and "
+                        "report validation OA after Stage 1 and after Stage 2 (diagnostics; "
+                        "the meta-testing pool is not used for this)")
+    p.add_argument("--val-episodes", type=int, default=30)
+    p.add_argument("--no-diffusion", action="store_true",
+                   help='ablation "w/o Diff": feed X_0 to HDPM without reverse diffusion')
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
     p.add_argument("--map-batch", type=int, default=None,
                    help="patches per forward pass for the map (default 128 on GPU, 64 on CPU)")
@@ -209,6 +217,7 @@ def main():
     src_ds = get_dataset(args.source, args.data_root)
     tgt_ds = get_dataset(args.target, args.data_root)
     cfg = demo_config(args.patch_size)
+    cfg.dadge.bypass_enhancement = args.no_diffusion
     split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=args.seed)
 
     src_x = torch.from_numpy(split["source_patches"])
@@ -220,11 +229,19 @@ def main():
     target_classes = list(split["target_classes"])
     n_cls_t = len(target_classes)
     n_way = min(args.n_way, n_cls_t)
+    val_x = val_y = None
+    if args.val_fraction > 0:
+        keep, val = split_validation(split["target_tr_labels"], args.val_fraction, seed=args.seed + 1)
+        keep, val = torch.as_tensor(keep, dtype=torch.long), torch.as_tensor(val, dtype=torch.long)
+        val_x, val_y = tr_x[val], tr_y[val]
+        tr_x, tr_y = tr_x[keep], tr_y[keep]
     timings["data_s"] = time.time() - t0
 
     print(f"  Source  {src_ds}  → {len(src_y)} labelled patches")
     print(f"  Target  {tgt_ds}")
     print(f"          meta-training pool P_t^tr: {len(tr_y)}   meta-testing pool P_t^te: {len(te_y)}")
+    if val_y is not None:
+        print(f"          validation pool (held out from P_t^tr): {len(val_y)}")
 
     # ----------------------------------------------------------------- model
     model = DGMHMamba(cfg, src_ds.n_bands, tgt_ds.n_bands, len(split["source_classes"])).to(device)
@@ -234,7 +251,15 @@ def main():
 
     # Placeholder semantic anchors (GloVe class-name anchors not implemented yet)
     anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
-    history = {"stage1": [], "stage2": []}
+    history = {"stage1": [], "stage2": [], "validation": {}}
+
+    def validate(tag):
+        if val_y is None:
+            return
+        m = evaluate_episodes(model, val_x, val_y, n_way, args.k_shot, args.q_query, anchors,
+                              device, n_cls_t, n_episodes=args.val_episodes, seed=777 + args.seed)
+        history["validation"][tag] = m["oa_mean"]
+        print(f"  [validation, {tag}] {n_way}-way {args.k_shot}-shot {format_metrics(m)}")
 
     # --------------------------------------------------------------- stage 1
     print("=" * 64)
@@ -266,7 +291,9 @@ def main():
             print(f"  iter {it:4d} | λ_grl={lambda_grl:.2f} | L_cls={l_cls.item():.3f} "
                   f"L_diff={l_diff.item():.3f} L_adv={l_adv.item():.3f}")
     timings["stage1_s"] = time.time() - t0
-    print(f"  Stage 1 done in {timings['stage1_s']:.0f} s\n")
+    print(f"  Stage 1 done in {timings['stage1_s']:.0f} s")
+    validate("after Stage 1")
+    print()
 
     # --------------------------------------------------------------- stage 2
     print("=" * 64)
@@ -289,7 +316,8 @@ def main():
 
         opt.zero_grad(set_to_none=True)
         l_epi, l_gcl, logits = model.stage2_episode(
-            sx0, sy.to(device), qx0, qy.to(device), n_way, anchors[:n_way].to(device)
+            sx0, sy.to(device), qx0, qy.to(device), n_way,
+            anchors[torch.as_tensor(ep_classes, dtype=torch.long)].to(device)
         )
         loss = total_objective_stage2(l_epi, l_gcl, cfg.loss)
         loss.backward()
@@ -302,7 +330,9 @@ def main():
             print(f"  episode {step:4d} | L_epi={l_epi.item():.3f} L_gcl={l_gcl.item():.3f} "
                   f"query acc={acc*100:5.1f}%")
     timings["stage2_s"] = time.time() - t0
-    print(f"  Stage 2 done in {timings['stage2_s']:.0f} s\n")
+    print(f"  Stage 2 done in {timings['stage2_s']:.0f} s")
+    validate("after Stage 2")
+    print()
 
     # ------------------------------------------------------------ evaluation
     print("=" * 64)

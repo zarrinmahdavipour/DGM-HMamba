@@ -44,10 +44,14 @@ class DGMHMamba(nn.Module):
         ddim: bool = False,
     ) -> torch.Tensor:
         """Full inference path: DADGE enhance -> HDPM -> embedding (B, d3)."""
-        x_hat, eps_hat, _ = self.dadge.enhance(
-            x0, num_steps=num_inference_steps, ddim=ddim
-        )
+        x_hat, eps_hat = self._enhance(x0, num_inference_steps, ddim)
         return self.hdpm(x_hat, eps_hat)
+
+    def _enhance(self, x0, num_inference_steps=None, ddim=False):
+        if self.cfg.dadge.bypass_enhancement:
+            return x0, torch.zeros_like(x0)
+        x_hat, eps_hat, _ = self.dadge.enhance(x0, num_steps=num_inference_steps, ddim=ddim)
+        return x_hat, eps_hat
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -67,7 +71,7 @@ class DGMHMamba(nn.Module):
         # would be reversed and push the features towards a larger diffusion loss.
         c_for_diff = c_source.detach()
 
-        x_hat_s, eps_hat_s, _ = self.dadge.enhance(x0_source)
+        x_hat_s, eps_hat_s = self._enhance(x0_source)
         f_source = self.hdpm(x_hat_s, eps_hat_s)
 
         l_cls = source_classification_loss(self.source_head, f_source, y_source)
