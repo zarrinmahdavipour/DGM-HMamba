@@ -2,7 +2,8 @@
 
 Sources, tried in order for every file:
   1. the Hugging Face mirror of the EHU files (https://huggingface.co/danaroth),
-     which is fast and reachable from cloud machines such as Google Colab;
+     which is fast and reachable from cloud machines such as Google Colab
+     (plus a GitHub copy of the Pavia University files);
   2. the original EHU page
      (http://www.ehu.eus/ccwintco/index.php/Hyperspectral_Remote_Sensing_Scenes),
      over https and then http.
@@ -25,6 +26,7 @@ from .datasets import DATASET_INFO
 
 EHU = "www.ehu.eus/ccwintco/uploads"
 HF = "https://huggingface.co/datasets/danaroth"
+GH_SSFCN = "https://raw.githubusercontent.com/YonghaoXu/SSFCN/master/DataSets"
 
 # name -> [(file name, expected array shape, [urls ...]), ...]
 FILES = {
@@ -41,10 +43,12 @@ FILES = {
     "pavia_u": [
         ("PaviaU.mat", (610, 340, 103), [
             f"{HF}/pavia/resolve/main/PaviaU.mat",
+            f"{GH_SSFCN}/PaviaU.mat",
             f"https://{EHU}/e/ee/PaviaU.mat",
             f"http://{EHU}/e/ee/PaviaU.mat"]),
         ("PaviaU_gt.mat", (610, 340), [
             f"{HF}/pavia/resolve/main/PaviaU_gt.mat",
+            f"{GH_SSFCN}/PaviaU_gt.mat",
             f"https://{EHU}/5/50/PaviaU_gt.mat",
             f"http://{EHU}/5/50/PaviaU_gt.mat"]),
     ],
