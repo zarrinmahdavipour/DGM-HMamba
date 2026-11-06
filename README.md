@@ -52,7 +52,7 @@ pip install pytest && pytest -q      # optional: unit tests (CPU, < 1 min)
 
 ## Data
 
-Place the standard `.mat` files as follows, or let `prepare_data.py` download the scenes that have direct public links (Indian Pines, Pavia University, Pavia Centre):
+Place the standard `.mat` files as follows, or let `prepare_data.py` download Indian Pines, Pavia University, Pavia Centre and Salinas. It tries a [Hugging Face mirror](https://huggingface.co/danaroth) of the EHU files first, falls back to the EHU server, and checks the array shape of every file:
 
 ```
 data/
