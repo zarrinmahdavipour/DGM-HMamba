@@ -215,3 +215,13 @@ def test_gradient_checkpointing_gives_same_gradients():
     g1 = m1.hdpm.levels[0].spectral_blocks[0].in_proj.weight.grad
     g2 = m2.hdpm.levels[0].spectral_blocks[0].in_proj.weight.grad
     assert torch.allclose(g1, g2, atol=1e-5)
+
+
+def test_denoiser_skip_path_is_bounded_and_starts_at_zero():
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    den = m.dadge.denoiser
+    x, t, c = torch.randn(2, 200, 5, 5), torch.tensor([1, 3]), torch.randn(2, 128)
+    assert torch.allclose(den(x, t, c), den(x, t, c, torch.tensor([0.01, 0.3])))
+    torch.nn.init.normal_(den.skip.weight, std=0.01)
+    small = den(x, t, c, torch.tensor([0.01, 0.01])) - den(x, t, c)
+    assert torch.count_nonzero(small) == 0   # skip disabled below 0.1
