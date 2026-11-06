@@ -142,6 +142,8 @@ def parse_args():
                    help="deterministic DDIM reverse chain for the enhancement")
     p.add_argument("--ema", type=float, default=0.0,
                    help="EMA decay for Stage-2 weights (0 = off); the EMA weights are evaluated")
+    p.add_argument("--clip-grad", type=float, default=1.0,
+                   help="clip the gradient norm (0 = off)")
     p.add_argument("--select-on-val", action="store_true",
                    help="evaluate the Stage-2 checkpoint with the best validation OA")
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
@@ -303,6 +305,8 @@ def main():
     # Placeholder semantic anchors (GloVe class-name anchors not implemented yet)
     anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
     history = {"stage1": [], "stage2": [], "validation": {}}
+    skipped = {"stage1": 0, "stage2": 0}   # updates skipped because the loss was not finite
+    history["skipped_updates"] = skipped
 
     def validate(tag, net=None):
         if val_y is None:
@@ -338,7 +342,12 @@ def main():
         opt.zero_grad(set_to_none=True)
         l_cls, l_diff, l_adv = model.stage1_losses(x0_s, src_y[si].to(device), x0_t, lambda_grl)
         loss = total_objective_stage1(l_cls, l_diff, l_adv, cfg.loss)
+        if not torch.isfinite(loss):
+            skipped["stage1"] += 1
+            continue
         loss.backward()
+        if args.clip_grad > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
         opt.step()
 
         history["stage1"].append({
@@ -386,7 +395,12 @@ def main():
             anchors[torch.as_tensor(ep_classes, dtype=torch.long)].to(device)
         )
         loss = total_objective_stage2(l_epi, l_gcl, cfg.loss)
+        if not torch.isfinite(loss):
+            skipped["stage2"] += 1
+            continue
         loss.backward()
+        if args.clip_grad > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
         opt.step()
         if ema_model is not None:
             with torch.no_grad():

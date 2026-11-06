@@ -49,7 +49,8 @@ jobs:
               h = s["history"]
               print("RESULT validation", {k: round(v * 100, 2) for k, v in h.get("validation", {}).items()})
               print("RESULT train acc (last 10% of episodes):", round(h.get("train_acc_last10pct", 0) * 100, 2),
-                    "| selected episode:", h.get("selected_episode"))
+                    "| selected episode:", h.get("selected_episode"),
+                    "| skipped non-finite updates:", h.get("skipped_updates"))
               print("RESULT timings", {k: round(v) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4

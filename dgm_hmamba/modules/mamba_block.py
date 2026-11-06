@@ -27,6 +27,10 @@ class MambaBlock(nn.Module):
         self.d_state = d_state
         self.d_inner = int(expand * d_model)
 
+        # Pre-normalisation of the residual branch, as in the Mamba residual
+        # block (Gu & Dao, 2023). Without it activations can grow without
+        # bound at larger learning rates.
+        self.norm = nn.LayerNorm(d_model)
         self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
         self.conv1d = nn.Conv1d(
             self.d_inner,
@@ -66,7 +70,7 @@ class MambaBlock(nn.Module):
         B, L, _ = x.shape
         residual = x
 
-        xz = self.in_proj(x)                       # (B, L, 2*d_inner)
+        xz = self.in_proj(self.norm(x))            # (B, L, 2*d_inner)
         x, z = xz.chunk(2, dim=-1)
 
         # Causal depthwise conv
