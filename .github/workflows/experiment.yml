@@ -43,15 +43,24 @@ jobs:
               s = json.load(open(p))
               for k, m in s["episodic_metrics"].items():
                   print(f"RESULT {k}: OA {m['oa_mean']*100:.2f} +/- {m['oa_std']*100:.2f}  AA {m['aa']*100:.2f}  kappa {m['kappa']:.4f}")
-              if s["map_metrics"]:
-                  mm = s["map_metrics"]
-                  print(f"RESULT map: OA {mm['oa']*100:.2f}  AA {mm['aa']*100:.2f}  kappa {mm['kappa']:.4f}")
+                  print(f"RESULT {k} per-class acc:", [None if a is None else round(a * 100, 1) for a in m.get("per_class_acc", [])])
+              mm = s.get("map_metrics")
+              if mm:
+                  print(f"RESULT map ({mm['repeats']} draws): OA {mm['oa_mean']*100:.2f} +/- {mm['oa_sd']*100:.2f}  "
+                        f"AA {mm['aa_mean']*100:.2f} +/- {mm['aa_sd']*100:.2f}  kappa {mm['kappa_mean']:.4f}")
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print("RESULT map recall   :", r1(mm["recall_mean"]))
+                  print("RESULT map precision:", r1(mm["pooled_precision"]))
+                  print("RESULT map F1       :", r1(mm["pooled_f1"]))
+                  print("RESULT map confusion:", mm["pooled_confusion"])
               h = s["history"]
               print("RESULT validation", {k: round(v * 100, 2) for k, v in h.get("validation", {}).items()})
               print("RESULT train acc (last 10% of episodes):", round(h.get("train_acc_last10pct", 0) * 100, 2),
                     "| selected episode:", h.get("selected_episode"),
                     "| skipped non-finite updates:", h.get("skipped_updates"))
-              print("RESULT timings", {k: round(v) for k, v in s["timings_s"].items()})
+              si = s.get("split_info", {})
+              print("RESULT split", {k: v for k, v in si.items() if k != "leakage"}, "leakage", si.get("leakage"))
+              print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4
         if: always()

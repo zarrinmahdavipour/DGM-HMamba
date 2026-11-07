@@ -33,11 +33,18 @@ def metrics_from_confusion(cm: np.ndarray) -> Dict[str, object]:
     aa = float(np.nanmean(per_class)) if present.any() else 0.0
     pe = float((cm.sum(axis=0) * cm.sum(axis=1)).sum()) / (total * total)
     kappa = (oa - pe) / (1 - pe) if pe < 1 else 0.0
+    predicted = cm.sum(axis=0)
+    precision = np.where(predicted > 0, diag / np.maximum(predicted, 1), np.nan)
+    f1 = np.where((precision + per_class) > 0,
+                  2 * precision * per_class / np.maximum(precision + per_class, 1e-12), np.nan)
+    tolist = lambda a: [None if np.isnan(v) else float(v) for v in a]
     return {
         "oa": float(oa),
         "aa": aa,
         "kappa": float(kappa),
-        "per_class": [None if np.isnan(v) else float(v) for v in per_class],
+        "per_class": tolist(per_class),          # recall = class accuracy
+        "precision": tolist(precision),
+        "f1": tolist(f1),
     }
 
 

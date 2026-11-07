@@ -52,7 +52,7 @@ from dgm_hmamba.data.datasets import CLASS_NAMES
 from dgm_hmamba.episodes import ByClassIndex, gather_episode
 from dgm_hmamba.evaluation import evaluate_episodes, format_metrics
 from dgm_hmamba.losses import total_objective_stage1, total_objective_stage2
-from dgm_hmamba.metrics import classification_report
+from dgm_hmamba.metrics import classification_report, metrics_from_confusion
 from dgm_hmamba.augment import augment_patches
 import copy
 import math
@@ -147,6 +147,12 @@ def parse_args():
     p.add_argument("--select-on-val", action="store_true",
                    help="evaluate the Stage-2 checkpoint with the best validation OA")
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
+    p.add_argument("--map-repeats", type=int, default=10,
+                   help="number of support draws for the 9-class map (mean ± SD reported)")
+    p.add_argument("--split", choices=["random", "block"], default="random",
+                   help="random: per-class random pixel split (manuscript protocol); "
+                        "block: spatially disjoint blocks with a buffer (no shared patch pixels)")
+    p.add_argument("--block-size", type=int, default=64)
     p.add_argument("--map-batch", type=int, default=None,
                    help="patches per forward pass for the map (default 128 on GPU, 64 on CPU)")
     p.add_argument("--seed", type=int, default=42)
@@ -270,7 +276,8 @@ def main():
     src_ds = get_dataset(args.source, args.data_root)
     tgt_ds = get_dataset(args.target, args.data_root)
     cfg = demo_config(args)
-    split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=args.seed)
+    split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=args.seed,
+                                    split_mode=args.split, block_size=args.block_size)
 
     src_x = torch.from_numpy(split["source_patches"])
     src_y = torch.from_numpy(split["source_labels"])
@@ -294,6 +301,15 @@ def main():
     print(f"          meta-training pool P_t^tr: {len(tr_y)}   meta-testing pool P_t^te: {len(te_y)}")
     if val_y is not None:
         print(f"          validation pool (held out from P_t^tr): {len(val_y)}")
+    si = split["split_info"]
+    lk = si["leakage"]
+    print(f"          split: {si['mode']} {({k: v for k, v in si.items() if k not in ('mode', 'leakage')})} | "
+          f"test patches containing training pixels: {100 * lk['any_train_in_patch']:.1f}% "
+          f"(same class {100 * lk['same_class_train_in_patch']:.1f}%), "
+          f"sharing input pixels with a training patch: {100 * lk['patches_share_pixels']:.1f}%")
+    print("          pixels per class (train/test): " + ", ".join(
+        f"{CLASS_NAMES.get(tgt_ds.name, [])[c - 1] if CLASS_NAMES.get(tgt_ds.name) else c} "
+        f"{int((tr_y == i).sum())}/{int((te_y == i).sum())}" for i, c in enumerate(target_classes)))
 
     # ----------------------------------------------------------------- model
     model = DGMHMamba(cfg, src_ds.n_bands, tgt_ds.n_bands, len(split["source_classes"])).to(device)
@@ -450,47 +466,78 @@ def main():
         )
         metrics[f"{n_way}way_{k}shot"] = m
         print(f"  {n_way}-way {k}-shot: {format_metrics(m)}")
+        print("    per-class accuracy: " + ", ".join(
+            "-" if a is None else f"{100 * a:.1f}" for a in m.get("per_class_acc", [])))
     timings["eval_s"] = time.time() - t0
 
     # ---------------------------------------------------- classification map
-    pred_map, map_report = None, None
+    pred_map, map_report, map_summary = None, None, None
+    names = CLASS_NAMES.get(tgt_ds.name, [str(c) for c in target_classes])
+    cname = lambda i: names[target_classes[i] - 1] if len(names) >= target_classes[i] else str(target_classes[i])
     if not args.no_map:
         t0 = time.time()
         k = args.k_shot
-        print(f"\nClassification map: {n_cls_t}-way, {k} labelled pixels per class from P_t^te, "
-              f"all other P_t^te pixels are queries ...")
+        print(f"\nClassification map: {n_cls_t}-way, {k} labelled pixels per class drawn from P_t^te "
+              f"({args.map_repeats} independent draws); all other P_t^te pixels are queries ...")
         model.eval()
         te_lab = te_y.numpy()
-        rs = np.random.RandomState(args.seed)
-        sup_idx = []
-        for c in range(n_cls_t):
-            idx = np.where(te_lab == c)[0]
-            sup_idx.extend(rs.choice(idx, size=min(k, len(idx)), replace=False).tolist())
-        sup_t = torch.as_tensor(sup_idx, dtype=torch.long)
-        is_sup = np.zeros(len(te_lab), dtype=bool)
-        is_sup[sup_idx] = True
-
         bs = args.map_batch or (128 if device.type == "cuda" else 64)
-        preds = np.empty(len(te_lab), dtype=np.int64)
+        feats = []
+        t_enc = time.time()
         with torch.no_grad():
-            f_s = model.encode(model.project_bands(te_x[sup_t].to(device), is_source=False))
-            protos = model.dsspe.evolve(
-                f_s, te_y[sup_t].to(device), n_cls_t, anchors[:n_cls_t].to(device)
-            )
             for b in range(0, len(te_lab), bs):
                 xb = te_x[b:b + bs].to(device)
-                f_q = model.encode(model.project_bands(xb, is_source=False))
-                preds[b:b + len(xb)] = model.dsspe.classify(f_q, protos).argmax(-1).cpu().numpy()
-
-        q = ~is_sup
-        map_report = classification_report(te_lab[q], preds[q], n_cls_t)
-        coords = split["target_te_coords"]
-        pred_map = np.zeros(tgt_ds.gt.shape, dtype=np.int64)
-        pred_map[coords[:, 0], coords[:, 1]] = preds + 1
+                feats.append(model.encode(model.project_bands(xb, is_source=False)).cpu())
+        feats = torch.cat(feats)
+        timings["inference_ms_per_patch"] = 1000 * (time.time() - t_enc) / len(te_lab)
+        rs = np.random.RandomState(args.seed)
+        cm_sum = np.zeros((n_cls_t, n_cls_t), dtype=np.int64)
+        reps = []
+        with torch.no_grad():
+            for r in range(args.map_repeats):
+                sup_idx = np.concatenate([
+                    rs.choice(np.where(te_lab == c)[0], size=min(k, int((te_lab == c).sum())), replace=False)
+                    for c in range(n_cls_t)])
+                sup_t = torch.as_tensor(sup_idx, dtype=torch.long)
+                protos = model.dsspe.evolve(feats[sup_t].to(device), te_y[sup_t].to(device),
+                                            n_cls_t, anchors[:n_cls_t].to(device))
+                preds = model.dsspe.classify(feats.to(device), protos).argmax(-1).cpu().numpy()
+                q = np.ones(len(te_lab), dtype=bool)
+                q[sup_idx] = False
+                rep = classification_report(te_lab[q], preds[q], n_cls_t)
+                reps.append(rep)
+                cm_sum += np.array(rep["confusion_matrix"])
+                if r == 0:
+                    coords = split["target_te_coords"]
+                    pred_map = np.zeros(tgt_ds.gt.shape, dtype=np.int64)
+                    pred_map[coords[:, 0], coords[:, 1]] = preds + 1
         timings["map_s"] = time.time() - t0
-        print(f"  {int(q.sum())} query pixels: OA {map_report['oa']*100:.2f}%  "
-              f"AA {map_report['aa']*100:.2f}%  κ {map_report['kappa']:.4f}  "
-              f"({timings['map_s']:.0f} s)")
+
+        mean_sd = lambda key: (float(np.mean([r[key] for r in reps])),
+                               float(np.std([r[key] for r in reps], ddof=1)) if len(reps) > 1 else 0.0)
+        oa_m, oa_s = mean_sd("oa"); aa_m, aa_s = mean_sd("aa"); kp_m, kp_s = mean_sd("kappa")
+        rec = np.array([[np.nan if v is None else v for v in r["per_class"]] for r in reps])
+        pooled = metrics_from_confusion(cm_sum)
+        rown = cm_sum / np.maximum(cm_sum.sum(1, keepdims=True), 1)
+        map_report = {"oa": oa_m, "aa": aa_m, "kappa": kp_m}
+        map_summary = {
+            "repeats": len(reps), "oa_mean": oa_m, "oa_sd": oa_s, "aa_mean": aa_m, "aa_sd": aa_s,
+            "kappa_mean": kp_m, "kappa_sd": kp_s,
+            "recall_mean": np.nanmean(rec, 0).tolist(), "recall_sd": np.nanstd(rec, 0, ddof=1).tolist(),
+            "pooled_precision": pooled["precision"], "pooled_recall": pooled["per_class"],
+            "pooled_f1": pooled["f1"], "pooled_confusion": cm_sum.tolist(),
+        }
+        print(f"  OA {100 * oa_m:.2f} ± {100 * oa_s:.2f} %   AA {100 * aa_m:.2f} ± {100 * aa_s:.2f} %   "
+              f"κ {kp_m:.4f} ± {kp_s:.4f}   ({len(reps)} draws, "
+              f"{timings['inference_ms_per_patch']:.2f} ms/patch inference)")
+        print(f"  {'class':<22}{'recall':>14}{'prec':>7}{'F1':>7}   row-normalised confusion (%)")
+        for i in range(n_cls_t):
+            print(f"  {cname(i):<22}{100 * np.nanmean(rec[:, i]):7.1f} ±{100 * np.nanstd(rec[:, i], ddof=1):4.1f}"
+                  f"{100 * (pooled['precision'][i] or 0):7.1f}{100 * (pooled['f1'][i] or 0):7.1f}   "
+                  + " ".join(f"{100 * v:3.0f}" for v in rown[i]))
+        off = sorted(((rown[i, j], i, j) for i in range(n_cls_t) for j in range(n_cls_t) if i != j), reverse=True)[:5]
+        print("  most frequent confusions: " + "; ".join(
+            f"{cname(i)} → {cname(j)} {100 * v:.1f}%" for v, i, j in off))
 
     timings["total_s"] = time.time() - t_all
 
@@ -513,8 +560,8 @@ def main():
         "pool_sizes": {"source": len(src_y), "target_meta_train": len(tr_y),
                        "target_meta_test": len(te_y)},
         "episodic_metrics": metrics,
-        "map_metrics": None if map_report is None else
-            {k: map_report[k] for k in ("oa", "aa", "kappa", "per_class")},
+        "map_metrics": map_summary,
+        "split_info": split["split_info"],
         "timings_s": timings,
         "history": history,
     }
