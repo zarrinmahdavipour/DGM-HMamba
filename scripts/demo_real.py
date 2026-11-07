@@ -164,6 +164,12 @@ def parse_args():
                    help="reuse the block assignment saved in a split JSON (block_grid)")
     p.add_argument("--norm", choices=["scene", "train"], default="scene",
                    help="target scaling: whole scene (legacy) or fitted on training pixels only")
+    p.add_argument("--stop-after", type=int, default=0,
+                   help="stop Stage 2 after this episode and write <output-dir>/resume.pt "
+                        "(lets a run longer than one CI job continue in a second job)")
+    p.add_argument("--resume", default=None,
+                   help="continue Stage 2 from a resume.pt written with --stop-after; all other "
+                        "arguments must be identical")
     p.add_argument("--split-seed", type=int, default=None,
                    help="seed of the target split (default: --seed)")
     p.add_argument("--eval-seed", type=int, default=None,
@@ -265,6 +271,25 @@ def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report,
     plt.close(fig)
     paths.append(p)
     return paths
+
+
+RESUME_IGNORED = ("stop_after", "resume", "output_dir", "data_root", "download", "device")
+
+
+def _resume_args(args) -> dict:
+    return {k: v for k, v in sorted(vars(args).items()) if k not in RESUME_IGNORED}
+
+
+def _rng_state(rng: random.Random) -> dict:
+    return {"python": random.getstate(), "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(), "episode_rng": rng.getstate()}
+
+
+def _set_rng_state(state: dict, rng: random.Random) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    rng.setstate(state["episode_rng"])
 
 
 def main():
@@ -384,6 +409,20 @@ def main():
     history = {"stage1": [], "stage2": [], "validation": {}}
     skipped = {"stage1": 0, "stage2": 0}   # updates skipped because the loss was not finite
     history["skipped_updates"] = skipped
+    ckpt = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        if ckpt["args"] != _resume_args(args):
+            diff = {k: (ckpt["args"].get(k), v) for k, v in _resume_args(args).items() if ckpt["args"].get(k) != v}
+            raise SystemExit(f"--resume: arguments differ from the interrupted run: {diff}")
+        if ckpt["index_fingerprint"] != split["split_info"]["index_fingerprint"]:
+            raise SystemExit("--resume: the data split differs from the interrupted run")
+        anchors = ckpt["anchors"]
+        history, skipped = ckpt["history"], ckpt["skipped"]
+        history["skipped_updates"] = skipped
+        timings["stage1_s"] = ckpt["timings"]["stage1_s"]
+        t_all -= ckpt["timings"].get("total_s", 0.0)     # report the time of both parts
+        print(f"  resuming Stage 2 after episode {ckpt['step']} from {args.resume}")
 
     def validate(tag, net=None):
         if val_y is None:
@@ -402,12 +441,13 @@ def main():
     print(f"STAGE 1 – source pre-training + domain-adversarial diffusion ({args.stage1_iters} iters)")
     print("=" * 64)
     opt = AdamW(model.parameters(), lr=cfg.stage1_lr, weight_decay=cfg.weight_decay)
+    stage1_iters = 0 if ckpt is not None else args.stage1_iters   # resumed: Stage 1 already done
     warmup = max(1, int(0.15 * args.stage1_iters))   # paper: λ_grl ramps over 30 of 200 epochs
     lr_warm1 = int(args.warmup_frac * args.stage1_iters)
     gen = torch.Generator().manual_seed(args.seed)
     model.train()
     t0 = time.time()
-    for it in range(1, args.stage1_iters + 1):
+    for it in range(1, stage1_iters + 1):
         lambda_grl = min(1.0, it / warmup)
         for g in opt.param_groups:
             g["lr"] = cfg.stage1_lr * lr_factor(it, args.stage1_iters, lr_warm1, args.schedule)
@@ -434,9 +474,10 @@ def main():
         if it == 1 or it % 20 == 0 or it == args.stage1_iters:
             print(f"  iter {it:4d} | λ_grl={lambda_grl:.2f} | L_cls={l_cls.item():.3f} "
                   f"L_diff={l_diff.item():.3f} L_adv={l_adv.item():.3f}")
-    timings["stage1_s"] = time.time() - t0
-    print(f"  Stage 1 done in {timings['stage1_s']:.0f} s")
-    validate("after Stage 1")
+    if ckpt is None:
+        timings["stage1_s"] = time.time() - t0
+        print(f"  Stage 1 done in {timings['stage1_s']:.0f} s")
+        validate("after Stage 1")
     print()
 
     # --------------------------------------------------------------- stage 2
@@ -454,8 +495,31 @@ def main():
     rng = random.Random(args.seed)
     best = (-1.0, None, 0)
     ema_model = copy.deepcopy(model) if args.ema > 0 else None
+    start, stage2_before = 1, 0.0
+    if ckpt is not None:
+        model.load_state_dict(ckpt["model"])
+        if ema_model is not None:
+            ema_model.load_state_dict(ckpt["ema"])
+        opt.load_state_dict(ckpt["opt"])
+        best = (ckpt["best"][0], ckpt["best"][1], ckpt["best"][2])
+        _set_rng_state(ckpt["rng"], rng)
+        start, stage2_before = ckpt["step"] + 1, ckpt["timings"]["stage2_s"]
+        del ckpt
     t0 = time.time()
-    for step in range(1, args.stage2_steps + 1):
+    for step in range(start, args.stage2_steps + 1):
+        if args.stop_after and step > args.stop_after:
+            path = out_dir / "resume.pt"
+            torch.save({
+                "step": step - 1, "args": _resume_args(args),
+                "index_fingerprint": split["split_info"]["index_fingerprint"],
+                "model": model.state_dict(), "ema": None if ema_model is None else ema_model.state_dict(),
+                "opt": opt.state_dict(), "best": best, "rng": _rng_state(rng), "anchors": anchors,
+                "history": history, "skipped": skipped,
+                "timings": {"stage1_s": timings["stage1_s"], "stage2_s": stage2_before + time.time() - t0,
+                            "total_s": time.time() - t_all},
+            }, path)
+            print(f"  stopped after episode {step - 1}; resume checkpoint → {path}")
+            return
         for g in opt.param_groups:
             g["lr"] = cfg.stage2_lr * lr_factor(step, args.stage2_steps, lr_warm2, args.schedule)
         try:
@@ -499,7 +563,7 @@ def main():
             v = validate(f"episode {step}", net)
             if v is not None and v > best[0]:
                 best = (v, copy.deepcopy(net.state_dict()), step)
-    timings["stage2_s"] = time.time() - t0
+    timings["stage2_s"] = stage2_before + time.time() - t0
     print(f"  Stage 2 done in {timings['stage2_s']:.0f} s")
     if ema_model is not None:
         model.load_state_dict(ema_model.state_dict())   # evaluate the EMA weights

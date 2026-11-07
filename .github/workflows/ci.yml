@@ -48,6 +48,24 @@ jobs:
           assert a["windows_disjoint"] and a["leakage"]["patches_share_pixels"] == 0
           print("geographic split reproduced from split.json:", a["index_fingerprint"])
           PY
+          # a run split into two jobs (--stop-after / --resume) must equal the uninterrupted run
+          COMMON="--data-root data_synthetic --patch-size 5 --stage1-iters 3 --stage2-steps 8 --eval-episodes 3
+            --device cpu --split block --block-size 10 --val-blocks 0.2 --min-counts 3,3,3 --norm train
+            --n-way 3 --k-shot 1 --q-query 2 --train-query 2 --val-episodes 2 --val-every 2 --select-on-val
+            --map-repeats 2 --augment --ema 0.9 --schedule cosine --warmup-frac 0.25"
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_full
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_part --stop-after 5
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_part --resume runs/ci_part/resume.pt
+          python - <<'PY'
+          import json
+          a = json.load(open("runs/ci_full/demo_summary.json"))
+          b = json.load(open("runs/ci_part/demo_summary.json"))
+          for k in ("episodic_metrics", "map_metrics"):
+              assert json.dumps(a[k], sort_keys=True) == json.dumps(b[k], sort_keys=True), k
+          assert a["history"]["validation"] == b["history"]["validation"]
+          assert a["history"]["selected_episode"] == b["history"]["selected_episode"]
+          print("stop/resume reproduces the uninterrupted run exactly")
+          PY
           python scripts/train.py --data-root data_synthetic --output-dir runs/ci_train \
             --stage1-epochs 1 --stage2-steps 2 --batch-size 16 --eval-every 1 \
             --eval-episodes 2 --val-fraction 0.2 --n-way 3 --k-shot 1 --q-query 2 \
