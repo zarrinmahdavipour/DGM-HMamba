@@ -286,3 +286,18 @@ def test_scene_normalisation_unchanged():
     b = make_cross_domain_split(src, raw, patch_size=5, seed=0, split_mode="random", target_norm="scene")
     assert np.allclose(a["target_tr_patches"], b["target_tr_patches"], atol=1e-6)
     assert np.array_equal(a["target_te_labels"], b["target_te_labels"])
+
+
+def test_focal_episodic_loss():
+    from dgm_hmamba.losses import episodic_loss
+
+    torch.manual_seed(0)
+    logits = torch.randn(12, 5)
+    y = torch.randint(0, 5, (12,))
+    plain = torch.nn.functional.cross_entropy(logits / 0.1, y)
+    assert torch.equal(episodic_loss(logits, y, 0.1), plain)                 # gamma 0: unchanged
+    assert torch.equal(episodic_loss(logits, y, 0.1, focal_gamma=0.0), plain)
+    ce = torch.nn.functional.cross_entropy(logits / 0.1, y, reduction="none")
+    ref = ((1 - torch.exp(-ce)) ** 2 * ce).mean()
+    assert torch.allclose(episodic_loss(logits, y, 0.1, focal_gamma=2.0), ref)
+    assert episodic_loss(logits, y, 0.1, focal_gamma=2.0) <= plain           # down-weights easy queries

@@ -105,7 +105,8 @@ class DGMHMamba(nn.Module):
         )
         cos_logits = self.dsspe.classify(f_query, prototypes)
         l_epi = episodic_loss(
-            cos_logits, query_labels, temperature=1.0 / self.cfg.dsspe.logit_scale
+            cos_logits, query_labels, temperature=1.0 / self.cfg.dsspe.logit_scale,
+            focal_gamma=self.cfg.loss.focal_gamma,
         )
         l_gcl = graph_contrastive_loss(
             self.dsspe.graph_encoder,

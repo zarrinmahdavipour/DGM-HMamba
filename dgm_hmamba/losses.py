@@ -23,9 +23,19 @@ def source_classification_loss(
 
 
 def episodic_loss(
-    cos_logits: torch.Tensor, query_labels: torch.Tensor, temperature: float = 1.0
+    cos_logits: torch.Tensor, query_labels: torch.Tensor, temperature: float = 1.0,
+    focal_gamma: float = 0.0,
 ) -> torch.Tensor:
-    return F.cross_entropy(cos_logits / temperature, query_labels)
+    """Cross-entropy over cosine logits; with focal_gamma > 0 each query's
+    term is weighted by (1 - p_true)^gamma (focal loss), so confidently
+    classified queries count less and the hard ones (confusable classes)
+    more. focal_gamma = 0 is exactly the plain cross-entropy."""
+    logits = cos_logits / temperature
+    if focal_gamma <= 0:
+        return F.cross_entropy(logits, query_labels)
+    ce = F.cross_entropy(logits, query_labels, reduction="none")
+    p_true = torch.exp(-ce)
+    return ((1.0 - p_true) ** focal_gamma * ce).mean()
 
 
 def total_objective_stage1(

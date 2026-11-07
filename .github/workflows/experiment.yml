@@ -18,23 +18,32 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+      - name: Skip code branches without exp_args.txt
+        run: |
+          if [ ! -f exp_args.txt ] && [ "${{ github.event_name }}" = "push" ]; then
+            echo "no exp_args.txt on this branch: nothing to run"; echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
       - uses: actions/setup-python@v5
+        if: env.SKIP != '1'
         with:
           python-version: "3.11"
       - name: Install CPU PyTorch and dependencies
+        if: env.SKIP != '1'
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
       - name: Download Indian Pines and Pavia University
+        if: env.SKIP != '1'
         run: python scripts/prepare_data.py --data-root data --download indian_pines pavia_u
       - name: Real-data demo
+        if: env.SKIP != '1'
         run: |
           EXTRA="$(cat exp_args.txt 2>/dev/null || true)"
           echo "extra args: $EXTRA ${{ github.event.inputs.args }}"
           python scripts/demo_real.py --data-root data --output-dir runs/exp --device cpu $EXTRA ${{ github.event.inputs.args }}
       - name: Summary
-        if: always()
+        if: always() && env.SKIP != '1'
         run: |
           python - <<'PY'
           import json, os
@@ -75,7 +84,7 @@ jobs:
               print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && env.SKIP != '1'
         with:
           name: experiment-outputs
           path: runs/exp/

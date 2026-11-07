@@ -75,6 +75,9 @@ class LossWeights:
     lambda_gcl: float = 0.1
     lambda_diff: float = 0.5
     lambda_adv: float = 0.1
+    # NOT IN PAPER: focal modulation of the episodic loss, (1 - p_t)^gamma;
+    # 0 = plain cross-entropy (the paper's L_epi)
+    focal_gamma: float = 0.0
 
 
 @dataclass
