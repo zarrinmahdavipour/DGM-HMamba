@@ -301,6 +301,8 @@ def main():
         saved = saved.get("split_info", saved)
         grid = np.array([[int(ch) for ch in row] for row in saved["block_grid"]])
         args.block_size = saved.get("block_size", args.block_size)
+        if args.split_seed is None and saved.get("split_seed") is not None:
+            split_seed = int(saved["split_seed"])      # report the seed that generated the grid
     split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=split_seed,
                                     split_mode=args.split, block_size=args.block_size,
                                     val_ratio=args.val_blocks if args.split == "block" else 0.0,

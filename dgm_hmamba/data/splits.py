@@ -353,7 +353,7 @@ def make_cross_domain_split(
             split_info.update({
                 "block_size": block_size, "buffer": buf,
                 "block_ratios": None if block_grid is not None else [round(r, 4) for r in ratios],
-                "min_counts": list(min_counts),
+                "min_counts": None if block_grid is not None else list(min_counts),
                 "block_grid": grid_strings(grid),
                 "block_grid_labelled": grid_strings(grid, tgt_coords, block_size),
                 "grid_fingerprint": _sha(grid.astype(np.int8), np.array([block_size, buf, *gt.shape])),
