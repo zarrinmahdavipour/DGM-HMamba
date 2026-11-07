@@ -1,0 +1,117 @@
+{
+ "split_info": {
+  "mode": "block",
+  "split_seed": 2,
+  "patch_size": 7,
+  "attempt": 2,
+  "dropped_pixels": {
+   "val": 757,
+   "train": 3791
+  },
+  "block_size": 64,
+  "buffer": 6,
+  "block_ratios": [
+   0.35,
+   0.15,
+   0.5
+  ],
+  "min_counts": [
+   50,
+   30,
+   100
+  ],
+  "block_grid": [
+   "221101",
+   "022022",
+   "010002",
+   "102222",
+   "101200",
+   "220022",
+   "102220",
+   "202012",
+   "212202",
+   "002021"
+  ],
+  "block_grid_labelled": [
+   "2211..",
+   "022...",
+   "0100..",
+   "1022..",
+   "101200",
+   "220022",
+   "102220",
+   "2020.2",
+   "21220.",
+   "00202."
+  ],
+  "grid_fingerprint": "81469a3e9e7e61d8",
+  "class_counts": {
+   "train": [
+    1222,
+    6841,
+    346,
+    608,
+    117,
+    2417,
+    491,
+    1653,
+    207
+   ],
+   "test": [
+    4437,
+    9162,
+    993,
+    1410,
+    759,
+    1295,
+    321,
+    843,
+    386
+   ],
+   "val": [
+    278,
+    858,
+    521,
+    809,
+    247,
+    636,
+    280,
+    833,
+    258
+   ]
+  },
+  "index_fingerprint": "0956a4114a607eb3",
+  "min_center_distance": {
+   "train-test": 7,
+   "train-val": 7,
+   "val-test": 7
+  },
+  "receptive_field": 7,
+  "windows_disjoint": true,
+  "leakage": {
+   "any_train_in_patch": 0.0,
+   "same_class_train_in_patch": 0.0,
+   "patches_share_pixels": 0.0
+  },
+  "leakage_train_val": {
+   "any_train_in_patch": 0.0,
+   "same_class_train_in_patch": 0.0,
+   "patches_share_pixels": 0.0
+  },
+  "class_names": [
+   "Asphalt",
+   "Meadows",
+   "Gravel",
+   "Trees",
+   "Painted metal sheets",
+   "Bare soil",
+   "Bitumen",
+   "Self-blocking bricks",
+   "Shadows"
+  ],
+  "image_shape": [
+   610,
+   340
+  ]
+ }
+}

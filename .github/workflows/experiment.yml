@@ -59,7 +59,19 @@ jobs:
                     "| selected episode:", h.get("selected_episode"),
                     "| skipped non-finite updates:", h.get("skipped_updates"))
               si = s.get("split_info", {})
-              print("RESULT split", {k: v for k, v in si.items() if k != "leakage"}, "leakage", si.get("leakage"))
+              print("RESULT seeds", s.get("seeds"))
+              hide = ("leakage", "leakage_train_val", "block_grid", "block_grid_labelled", "class_counts", "pool_class_counts")
+              print("RESULT split", {k: v for k, v in si.items() if k not in hide})
+              print("RESULT split leakage train-test", si.get("leakage"), "| train-val", si.get("leakage_train_val"))
+              if si.get("block_grid"):
+                  print("RESULT block grid (0 train, 1 val, 2 test)", " ".join(si["block_grid"]))
+              print("RESULT pool class counts", si.get("pool_class_counts"))
+              if mm and mm.get("support_separated"):
+                  sp = mm["support_separated"]
+                  print(f"RESULT map, queries sharing no pixels with supports: OA {sp['oa_mean']*100:.2f} +/- {sp['oa_sd']*100:.2f}  "
+                        f"AA {sp['aa_mean']*100:.2f} +/- {sp['aa_sd']*100:.2f}  excluded/draw {sp['excluded_queries_mean']:.0f}  "
+                        f"recall {[None if x is None else round(x * 100, 1) for x in sp['recall_mean']]}")
+                  print("RESULT map queries per class per draw:", mm.get("query_support_per_draw"))
               print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4

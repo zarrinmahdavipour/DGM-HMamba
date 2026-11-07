@@ -31,6 +31,23 @@ jobs:
           python scripts/prepare_data.py --data-root data_synthetic
           python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo \
             --patch-size 5 --stage1-iters 3 --stage2-steps 3 --eval-episodes 2 --device cpu
+          python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo_geo \
+            --patch-size 5 --stage1-iters 3 --stage2-steps 4 --eval-episodes 2 --device cpu \
+            --split block --block-size 10 --val-blocks 0.2 --min-counts 3,3,3 --norm train \
+            --split-seed 1 --eval-seed 0 --n-way 3 --k-shot 1 --q-query 2 --train-query 2 \
+            --val-episodes 2 --val-every 2 --select-on-val --map-repeats 2 --no-diffusion
+          python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo_geo2 \
+            --patch-size 5 --stage1-iters 2 --stage2-steps 2 --eval-episodes 2 --device cpu \
+            --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \
+            --q-query 2 --train-query 2 --val-episodes 2 --map-repeats 2 --no-diffusion
+          python - <<'PY'
+          import json
+          a = json.load(open("runs/ci_demo_geo/split.json"))["split_info"]
+          b = json.load(open("runs/ci_demo_geo2/split.json"))["split_info"]
+          assert a["index_fingerprint"] == b["index_fingerprint"], (a["index_fingerprint"], b["index_fingerprint"])
+          assert a["windows_disjoint"] and a["leakage"]["patches_share_pixels"] == 0
+          print("geographic split reproduced from split.json:", a["index_fingerprint"])
+          PY
           python scripts/train.py --data-root data_synthetic --output-dir runs/ci_train \
             --stage1-epochs 1 --stage2-steps 2 --batch-size 16 --eval-every 1 \
             --eval-episodes 2 --val-fraction 0.2 --n-way 3 --k-shot 1 --q-query 2 \

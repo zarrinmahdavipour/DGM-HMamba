@@ -34,6 +34,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.ndimage import maximum_filter
 from torch.optim import AdamW
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +154,21 @@ def parse_args():
                    help="random: per-class random pixel split (manuscript protocol); "
                         "block: spatially disjoint blocks with a buffer (no shared patch pixels)")
     p.add_argument("--block-size", type=int, default=64)
+    p.add_argument("--val-blocks", type=float, default=0.0,
+                   help="block split only: share of blocks forming a geographically separate "
+                        "validation region (three-way split; replaces --val-fraction)")
+    p.add_argument("--min-counts", default="50,30,100",
+                   help="three-way block split: minimum labelled pixels per class in the "
+                        "training, validation and testing partitions")
+    p.add_argument("--split-file", default=None,
+                   help="reuse the block assignment saved in a split JSON (block_grid)")
+    p.add_argument("--norm", choices=["scene", "train"], default="scene",
+                   help="target scaling: whole scene (legacy) or fitted on training pixels only")
+    p.add_argument("--split-seed", type=int, default=None,
+                   help="seed of the target split (default: --seed)")
+    p.add_argument("--eval-seed", type=int, default=None,
+                   help="seed of validation/test episodes and map support draws "
+                        "(default: derived from --seed, legacy behaviour)")
     p.add_argument("--map-batch", type=int, default=None,
                    help="patches per forward pass for the map (default 128 on GPU, 64 on CPU)")
     p.add_argument("--seed", type=int, default=42)
@@ -274,10 +290,25 @@ def main():
 
     t0 = time.time()
     src_ds = get_dataset(args.source, args.data_root)
-    tgt_ds = get_dataset(args.target, args.data_root)
+    tgt_ds = get_dataset(args.target, args.data_root, normalize=(args.norm == "scene"))
     cfg = demo_config(args)
-    split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=args.seed,
-                                    split_mode=args.split, block_size=args.block_size)
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    eval_seed = args.seed if args.eval_seed is None else args.eval_seed
+    grid = None
+    if args.split_file:
+        with open(args.split_file, encoding="utf-8") as f:
+            saved = json.load(f)
+        saved = saved.get("split_info", saved)
+        grid = np.array([[int(ch) for ch in row] for row in saved["block_grid"]])
+        args.block_size = saved.get("block_size", args.block_size)
+    split = make_cross_domain_split(src_ds, tgt_ds, patch_size=args.patch_size, seed=split_seed,
+                                    split_mode=args.split, block_size=args.block_size,
+                                    val_ratio=args.val_blocks if args.split == "block" else 0.0,
+                                    min_counts=tuple(int(v) for v in args.min_counts.split(",")),
+                                    block_grid=grid, target_norm=args.norm)
+    if args.split_file:
+        split["split_info"]["split_file"] = args.split_file
+    print(f"  Seeds: model {args.seed}, split {split_seed}, evaluation {eval_seed}")
 
     src_x = torch.from_numpy(split["source_patches"])
     src_y = torch.from_numpy(split["source_labels"])
@@ -289,7 +320,13 @@ def main():
     n_cls_t = len(target_classes)
     n_way = min(args.n_way, n_cls_t)
     val_x = val_y = None
-    if args.val_fraction > 0:
+    if split["target_val_labels"] is not None:
+        # geographically separate validation region (three-way block split)
+        val_x = torch.from_numpy(split["target_val_patches"])
+        val_y = torch.from_numpy(split["target_val_labels"])
+        if args.val_fraction > 0:
+            print("  (--val-fraction ignored: the validation region comes from the block split)")
+    elif args.val_fraction > 0:
         keep, val = split_validation(split["target_tr_labels"], args.val_fraction, seed=args.seed + 1)
         keep, val = torch.as_tensor(keep, dtype=torch.long), torch.as_tensor(val, dtype=torch.long)
         val_x, val_y = tr_x[val], tr_y[val]
@@ -300,16 +337,38 @@ def main():
     print(f"  Target  {tgt_ds}")
     print(f"          meta-training pool P_t^tr: {len(tr_y)}   meta-testing pool P_t^te: {len(te_y)}")
     if val_y is not None:
-        print(f"          validation pool (held out from P_t^tr): {len(val_y)}")
+        where = "geographic region" if split["target_val_labels"] is not None else "held out from P_t^tr"
+        print(f"          validation pool ({where}): {len(val_y)}")
     si = split["split_info"]
     lk = si["leakage"]
-    print(f"          split: {si['mode']} {({k: v for k, v in si.items() if k not in ('mode', 'leakage')})} | "
-          f"test patches containing training pixels: {100 * lk['any_train_in_patch']:.1f}% "
+    hidden = ("leakage", "leakage_train_val", "block_grid", "block_grid_labelled", "class_counts")
+    print(f"          split: {si['mode']} {({k: v for k, v in si.items() if k not in hidden})}")
+    print(f"          test patches containing training pixels: {100 * lk['any_train_in_patch']:.1f}% "
           f"(same class {100 * lk['same_class_train_in_patch']:.1f}%), "
           f"sharing input pixels with a training patch: {100 * lk['patches_share_pixels']:.1f}%")
-    print("          pixels per class (train/test): " + ", ".join(
-        f"{CLASS_NAMES.get(tgt_ds.name, [])[c - 1] if CLASS_NAMES.get(tgt_ds.name) else c} "
-        f"{int((tr_y == i).sum())}/{int((te_y == i).sum())}" for i, c in enumerate(target_classes)))
+    if "leakage_train_val" in si:
+        lv = si["leakage_train_val"]
+        print(f"          validation patches sharing input pixels with a training patch: "
+              f"{100 * lv['patches_share_pixels']:.1f}%")
+    if "block_grid_labelled" in si:
+        print(f"          block assignment ({si['block_size']} px blocks; 0 train, 1 validation, 2 test, "
+              f". no labelled pixels): " + " ".join(si["block_grid_labelled"]))
+    names0 = CLASS_NAMES.get(tgt_ds.name)
+    pools = {"train": tr_y.numpy(), "val": None if val_y is None else val_y.numpy(), "test": te_y.numpy()}
+    print(f"          {'class':<22}" + "".join(f"{k:>16}" for k, v in pools.items() if v is not None))
+    for i, c in enumerate(target_classes):
+        cells = "".join(f"{int((v == i).sum()):>8} {100 * (v == i).mean():5.1f}%"
+                        for v in pools.values() if v is not None)
+        print(f"          {(names0[c - 1] if names0 else str(c)):<22}{cells}")
+    print(f"          {'total':<22}" + "".join(f"{len(v):>8} {100.0:5.1f}%" for v in pools.values() if v is not None))
+    si["pool_class_counts"] = {k: np.bincount(v, minlength=n_cls_t).tolist()
+                               for k, v in pools.items() if v is not None}
+    with open(out_dir / "split.json", "w", encoding="utf-8") as f:
+        json.dump({"split_info": si, "seeds": {"model": args.seed, "split": split_seed, "eval": eval_seed},
+                   "source": args.source, "target": args.target}, f, indent=1)
+    np.savez_compressed(out_dir / "split_coords.npz", train=split["target_tr_coords"],
+                        test=split["target_te_coords"],
+                        **({} if split["target_val_coords"] is None else {"val": split["target_val_coords"]}))
 
     # ----------------------------------------------------------------- model
     model = DGMHMamba(cfg, src_ds.n_bands, tgt_ds.n_bands, len(split["source_classes"])).to(device)
@@ -328,7 +387,7 @@ def main():
         if val_y is None:
             return None
         m = evaluate_episodes(net or model, val_x, val_y, n_way, args.k_shot, args.q_query, anchors,
-                              device, n_cls_t, n_episodes=args.val_episodes, seed=777 + args.seed)
+                              device, n_cls_t, n_episodes=args.val_episodes, seed=777 + eval_seed)
         history["validation"][tag] = m["oa_mean"]
         print(f"  [validation, {tag}] {n_way}-way {args.k_shot}-shot {format_metrics(m)}", flush=True)
         return m["oa_mean"]
@@ -462,7 +521,7 @@ def main():
     for k in sorted({1, args.k_shot}):
         m = evaluate_episodes(
             model, te_x, te_y, n_way, k, args.q_query, anchors, device, n_cls_t,
-            n_episodes=args.eval_episodes, seed=10_000 + args.seed,
+            n_episodes=args.eval_episodes, seed=10_000 + eval_seed,
         )
         metrics[f"{n_way}way_{k}shot"] = m
         print(f"  {n_way}-way {k}-shot: {format_metrics(m)}")
@@ -490,9 +549,11 @@ def main():
                 feats.append(model.encode(model.project_bands(xb, is_source=False)).cpu())
         feats = torch.cat(feats)
         timings["inference_ms_per_patch"] = 1000 * (time.time() - t_enc) / len(te_lab)
-        rs = np.random.RandomState(args.seed)
+        rs = np.random.RandomState(eval_seed)
+        te_coords = split["target_te_coords"]
+        H, W = tgt_ds.gt.shape
         cm_sum = np.zeros((n_cls_t, n_cls_t), dtype=np.int64)
-        reps = []
+        reps, reps_sep = [], []
         with torch.no_grad():
             for r in range(args.map_repeats):
                 sup_idx = np.concatenate([
@@ -507,6 +568,14 @@ def main():
                 rep = classification_report(te_lab[q], preds[q], n_cls_t)
                 reps.append(rep)
                 cm_sum += np.array(rep["confusion_matrix"])
+                # stricter variant: drop queries whose patch shares input pixels with a support patch
+                img = np.zeros((H, W), dtype=np.uint8)
+                img[te_coords[sup_idx, 0], te_coords[sup_idx, 1]] = 1
+                near = maximum_filter(img, size=2 * args.patch_size - 1)[te_coords[:, 0], te_coords[:, 1]] > 0
+                qs = q & ~near
+                rep_s = classification_report(te_lab[qs], preds[qs], n_cls_t)
+                rep_s["excluded"] = int((q & near).sum())
+                reps_sep.append(rep_s)
                 if r == 0:
                     coords = split["target_te_coords"]
                     pred_map = np.zeros(tgt_ds.gt.shape, dtype=np.int64)
@@ -526,6 +595,15 @@ def main():
             "recall_mean": np.nanmean(rec, 0).tolist(), "recall_sd": np.nanstd(rec, 0, ddof=1).tolist(),
             "pooled_precision": pooled["precision"], "pooled_recall": pooled["per_class"],
             "pooled_f1": pooled["f1"], "pooled_confusion": cm_sum.tolist(),
+            "query_support_per_draw": (cm_sum.sum(1) // len(reps)).tolist(),
+        }
+        so, ss_ = (float(np.mean([r["oa"] for r in reps_sep])), float(np.std([r["oa"] for r in reps_sep], ddof=1)) if len(reps_sep) > 1 else 0.0)
+        sa, sas = (float(np.mean([r["aa"] for r in reps_sep])), float(np.std([r["aa"] for r in reps_sep], ddof=1)) if len(reps_sep) > 1 else 0.0)
+        rec_s = np.array([[np.nan if v is None else v for v in r["per_class"]] for r in reps_sep])
+        map_summary["support_separated"] = {
+            "oa_mean": so, "oa_sd": ss_, "aa_mean": sa, "aa_sd": sas,
+            "recall_mean": np.nanmean(rec_s, 0).tolist(),
+            "excluded_queries_mean": float(np.mean([r["excluded"] for r in reps_sep])),
         }
         print(f"  OA {100 * oa_m:.2f} ± {100 * oa_s:.2f} %   AA {100 * aa_m:.2f} ± {100 * aa_s:.2f} %   "
               f"κ {kp_m:.4f} ± {kp_s:.4f}   ({len(reps)} draws, "
@@ -538,6 +616,14 @@ def main():
         off = sorted(((rown[i, j], i, j) for i in range(n_cls_t) for j in range(n_cls_t) if i != j), reverse=True)[:5]
         print("  most frequent confusions: " + "; ".join(
             f"{cname(i)} → {cname(j)} {100 * v:.1f}%" for v, i, j in off))
+        print(f"  confusion matrix, counts per draw (mean of {len(reps)} draws; rows true, columns predicted):")
+        for i in range(n_cls_t):
+            print(f"  {cname(i):<22}" + "".join(f"{v / len(reps):8.1f}" for v in cm_sum[i])
+                  + f"   | queries {cm_sum[i].sum() // len(reps)}")
+        ssep = map_summary["support_separated"]
+        print(f"  queries not sharing input pixels with any support patch "
+              f"({ssep['excluded_queries_mean']:.0f} queries per draw excluded): "
+              f"OA {100 * so:.2f} ± {100 * ss_:.2f} %   AA {100 * sa:.2f} ± {100 * sas:.2f} %")
 
     timings["total_s"] = time.time() - t_all
 
@@ -554,10 +640,12 @@ def main():
     summary = {
         "note": "Demo configuration with short training; these are not the manuscript's results.",
         "args": vars(args),
+        "seeds": {"model": args.seed, "split": split_seed, "eval": eval_seed},
         "device": str(device),
         "torch": torch.__version__,
         "trainable_parameters": n_params,
         "pool_sizes": {"source": len(src_y), "target_meta_train": len(tr_y),
+                       "target_validation": 0 if val_y is None else len(val_y),
                        "target_meta_test": len(te_y)},
         "episodic_metrics": metrics,
         "map_metrics": map_summary,

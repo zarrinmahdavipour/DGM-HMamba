@@ -136,6 +136,7 @@ class HSIDataset:
     data: np.ndarray          # (H, W, C) float32
     gt: np.ndarray            # (H, W) int64
     ignored_labels: Tuple[int, ...] = (0,)
+    normalized: bool = True   # False: raw values (scaling still to be fitted)
 
     @property
     def shape(self) -> Tuple[int, int, int]:
@@ -210,8 +211,30 @@ def _load_mat_array(path: Path, candidate_keys: list) -> np.ndarray:
     return np.asarray(arr)
 
 
-def load_hsi(name: str, data_root: str | Path) -> HSIDataset:
-    """Load a named hyperspectral dataset from disk."""
+def minmax_normalize(data: np.ndarray, fit_coords: Optional[np.ndarray] = None):
+    """Per-band min-max scaling to [0, 1].
+
+    The band minimum and maximum are computed over ``fit_coords`` ((N, 2)
+    row/col pixel positions) when given, otherwise over the whole scene.
+    Pixels outside the fitting set may fall outside [0, 1]; they are not
+    clipped. Returns (scaled copy, (lo, hi)).
+    """
+    pix = data.reshape(-1, data.shape[-1]) if fit_coords is None else data[fit_coords[:, 0], fit_coords[:, 1]]
+    lo, hi = pix.min(0), pix.max(0)
+    scale = np.where(hi > lo, hi - lo, 1.0).astype(np.float32)
+    out = ((data - lo) / scale).astype(np.float32)
+    out[..., ~(hi > lo)] = data[..., ~(hi > lo)]
+    return out, (lo, hi)
+
+
+def load_hsi(name: str, data_root: str | Path, normalize: bool = True) -> HSIDataset:
+    """Load a named hyperspectral dataset from disk.
+
+    normalize=True scales every band to [0, 1] using the whole scene (fine for
+    the source scene, which is used only for training). For the target scene
+    use normalize=False and fit the scaling on training pixels only (see
+    ``make_cross_domain_split(target_norm="train")``).
+    """
     name = name.lower().replace("-", "_").replace(" ", "_")
     if name not in DATASET_INFO:
         raise ValueError(
@@ -249,22 +272,24 @@ def load_hsi(name: str, data_root: str | Path) -> HSIDataset:
             f"Spatial shape mismatch: data {data.shape[:2]} vs gt {gt.shape[:2]}"
         )
 
-    # Simple per-band min-max normalisation to [0, 1]
-    data = data.copy()
-    for b in range(data.shape[-1]):
-        band = data[:, :, b]
-        lo, hi = band.min(), band.max()
-        if hi > lo:
-            data[:, :, b] = (band - lo) / (hi - lo)
+    if normalize:
+        # per-band min-max normalisation to [0, 1] over the whole scene
+        data = data.copy()
+        for b in range(data.shape[-1]):
+            band = data[:, :, b]
+            lo, hi = band.min(), band.max()
+            if hi > lo:
+                data[:, :, b] = (band - lo) / (hi - lo)
 
     return HSIDataset(
         name=name,
         data=data,
         gt=gt,
         ignored_labels=tuple(info["ignored_labels"]),
+        normalized=normalize,
     )
 
 
-def get_dataset(name: str, data_root: str | Path = "./data") -> HSIDataset:
+def get_dataset(name: str, data_root: str | Path = "./data", normalize: bool = True) -> HSIDataset:
     """Public entry point."""
-    return load_hsi(name, data_root)
+    return load_hsi(name, data_root, normalize=normalize)

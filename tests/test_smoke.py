@@ -225,3 +225,64 @@ def test_denoiser_skip_path_is_bounded_and_starts_at_zero():
     torch.nn.init.normal_(den.skip.weight, std=0.01)
     small = den(x, t, c, torch.tensor([0.01, 0.01])) - den(x, t, c)
     assert torch.count_nonzero(small) == 0   # skip disabled below 0.1
+
+
+def _tiled_scene(seed=0, h=120, w=90, bands=6):
+    from dgm_hmamba.data.datasets import HSIDataset
+
+    rng = np.random.RandomState(seed)
+    tiles = rng.randint(0, 10, size=(-(-h // 6), -(-w // 6)))      # 0 = unlabelled
+    gt = np.kron(tiles, np.ones((6, 6), dtype=np.int64))[:h, :w]
+    data = (rng.rand(h, w, bands) * 900 + 100).astype(np.float32)
+    return HSIDataset("pavia_u", data, gt, (0,), normalized=False)
+
+
+def test_geographic_split_is_disjoint_and_normalised_on_training_pixels():
+    from dgm_hmamba.data.datasets import HSIDataset
+    from dgm_hmamba.data.splits import min_center_distance
+
+    rng = np.random.RandomState(1)
+    src = HSIDataset("indian_pines", rng.rand(12, 12, 4).astype(np.float32), rng.randint(1, 4, (12, 12)), (0,))
+    tgt = _tiled_scene()
+    P = 5
+    kw = dict(patch_size=P, seed=3, split_mode="block", block_size=16, val_ratio=0.15,
+              min_counts=(5, 5, 5), target_norm="train")
+    sp = make_cross_domain_split(src, tgt, **kw)
+    si = sp["split_info"]
+    co = {k: sp[f"target_{k}_coords"] for k in ("tr", "val", "te")}
+    assert all(len(v) > 0 for v in co.values())
+    for a, b in (("tr", "te"), ("tr", "val"), ("val", "te")):
+        assert min_center_distance(co[a], co[b], tgt.gt.shape) >= P      # no shared input pixel
+    assert si["windows_disjoint"] and si["leakage"]["patches_share_pixels"] == 0.0
+    assert si["leakage_train_val"]["patches_share_pixels"] == 0.0
+    assert all(min(c) >= 5 for c in si["class_counts"].values())
+    # scaling fitted on the training pool only: its centre pixels span exactly [0, 1]
+    centre = sp["target_tr_patches"][:, :, P // 2, P // 2]
+    assert np.allclose(centre.min(0), 0.0, atol=1e-6) and np.allclose(centre.max(0), 1.0, atol=1e-6)
+    raw = tgt.data[co["tr"][:, 0], co["tr"][:, 1]]
+    lo, hi = raw.min(0), raw.max(0)
+    te_raw = tgt.data[co["te"][:, 0], co["te"][:, 1]]
+    assert np.allclose(sp["target_te_patches"][:, :, P // 2, P // 2], (te_raw - lo) / (hi - lo), atol=1e-5)
+    # the saved block assignment reproduces the same partitions
+    grid = np.array([[int(ch) for ch in row] for row in si["block_grid"]])
+    sp2 = make_cross_domain_split(src, tgt, **dict(kw, seed=99), block_grid=grid)
+    assert sp2["split_info"]["index_fingerprint"] == si["index_fingerprint"]
+    with pytest.raises(ValueError):          # buffer smaller than the patch would allow overlap
+        make_cross_domain_split(src, tgt, **dict(kw, buffer=P - 2))
+
+
+def test_scene_normalisation_unchanged():
+    import dataclasses
+    from dgm_hmamba.data.datasets import HSIDataset
+
+    rng = np.random.RandomState(2)
+    src = HSIDataset("indian_pines", rng.rand(12, 12, 4).astype(np.float32), rng.randint(1, 4, (12, 12)), (0,))
+    raw = _tiled_scene(seed=4)
+    old = raw.data.copy()
+    for b in range(old.shape[-1]):          # legacy whole-scene scaling
+        old[:, :, b] = (old[:, :, b] - old[:, :, b].min()) / (old[:, :, b].max() - old[:, :, b].min())
+    pre = dataclasses.replace(raw, data=old, normalized=True)
+    a = make_cross_domain_split(src, pre, patch_size=5, seed=0, split_mode="random")
+    b = make_cross_domain_split(src, raw, patch_size=5, seed=0, split_mode="random", target_norm="scene")
+    assert np.allclose(a["target_tr_patches"], b["target_tr_patches"], atol=1e-6)
+    assert np.array_equal(a["target_te_labels"], b["target_te_labels"])
