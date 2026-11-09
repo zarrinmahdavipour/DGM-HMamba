@@ -35,7 +35,15 @@ jobs:
             --patch-size 5 --stage1-iters 3 --stage2-steps 4 --eval-episodes 2 --device cpu \
             --split block --block-size 10 --val-blocks 0.2 --min-counts 3,3,3 --norm train \
             --split-seed 1 --eval-seed 0 --n-way 3 --k-shot 1 --q-query 2 --train-query 2 \
-            --val-episodes 2 --val-every 2 --select-on-val --map-repeats 2 --no-diffusion
+            --val-episodes 2 --val-every 2 --select-on-val --map-repeats 2 --no-diffusion \
+            --transductive --tr-grid "iters=1,3;scale=10;topk=0,5" --tr-val-draws 2
+          python - <<'PY'
+          import json
+          s = json.load(open("runs/ci_demo_geo/demo_summary.json"))
+          assert "transductive" in s["map_metrics"] and "transductive_selected" in s["episodic_metrics"]["3way_1shot"]
+          assert s["history"]["transductive_validation"]["selected"]
+          print("transductive results present; chosen on validation:", s["history"]["transductive_validation"]["selected"])
+          PY
           python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo_geo2 \
             --patch-size 5 --stage1-iters 2 --stage2-steps 2 --eval-episodes 2 --device cpu \
             --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \

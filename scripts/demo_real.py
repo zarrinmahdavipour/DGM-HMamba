@@ -54,6 +54,7 @@ from dgm_hmamba.episodes import ByClassIndex, gather_episode
 from dgm_hmamba.evaluation import evaluate_episodes, format_metrics
 from dgm_hmamba.losses import total_objective_stage1, total_objective_stage2
 from dgm_hmamba.metrics import classification_report, metrics_from_confusion
+from dgm_hmamba.transductive import config_name, parse_grid, refine_prototypes
 from dgm_hmamba.augment import augment_patches
 import copy
 import math
@@ -151,6 +152,13 @@ def parse_args():
     p.add_argument("--select-on-val", action="store_true",
                    help="evaluate the Stage-2 checkpoint with the best validation OA")
     p.add_argument("--no-map", action="store_true", help="skip the classification map")
+    p.add_argument("--transductive", action="store_true",
+                   help="also report transductive results: prototypes refined by soft k-means on the "
+                        "unlabelled pixels being classified; settings chosen on the validation pool only")
+    p.add_argument("--tr-grid", default="iters=1,3,10;scale=10,20;topk=0,200",
+                   help="transductive settings searched on the validation pool")
+    p.add_argument("--tr-val-draws", type=int, default=5,
+                   help="support draws of the validation 9-class map used to choose the map setting")
     p.add_argument("--map-repeats", type=int, default=10,
                    help="number of support draws for the 9-class map (mean ± SD reported)")
     p.add_argument("--split", choices=["random", "block"], default="random",
@@ -579,7 +587,68 @@ def main():
     history["selected_episode"] = best[2]
     n_tail = max(1, len(history["stage2"]) // 10)
     history["train_acc_last10pct"] = float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
+    torch.save({"model": model.state_dict(), "anchors": anchors, "selected_episode": best[2],
+                "args": vars(args)}, out_dir / "model_final.pt")
     print()
+
+    def encode_pool(x):
+        model.eval()
+        out = []
+        bsz = args.map_batch or (128 if device.type == "cuda" else 64)
+        with torch.no_grad():
+            for b in range(0, len(x), bsz):
+                out.append(model.encode(model.project_bands(x[b:b + bsz].to(device), is_source=False)).cpu())
+        return torch.cat(out)
+
+    # transductive settings are chosen on the validation pool only
+    tr_sel: dict = {}
+    if args.transductive and val_y is None:
+        print("  --transductive needs a validation pool: transductive results skipped")
+    elif args.transductive:
+        t_tr = time.time()
+        grid = parse_grid(args.tr_grid)
+        by_name = {config_name(c): c for c in grid}
+        tr_val = {}
+        print(f"Transductive settings, chosen on the validation pool ({len(grid)} candidates + inductive):")
+        for k in sorted({1, args.k_shot}):
+            m = evaluate_episodes(model, val_x, val_y, n_way, k, args.q_query, anchors, device, n_cls_t,
+                                  n_episodes=args.val_episodes, seed=555 + eval_seed, transductive=grid)
+            sc = {"inductive": m["oa_mean"], **{n: r["oa_mean"] for n, r in m["transductive"].items()}}
+            pick = max(sc, key=sc.get)
+            tr_sel[f"{n_way}way_{k}shot"] = by_name.get(pick)
+            tr_val[f"{n_way}way_{k}shot"] = sc
+            print(f"  {n_way}-way {k}-shot (validation OA): inductive {100 * sc['inductive']:.2f}%, "
+                  f"best {pick} {100 * sc[pick]:.2f}%")
+        vfeats, vlab = encode_pool(val_x), val_y.numpy()
+        rsv = np.random.RandomState(eval_seed + 1)
+        vdraws = [np.concatenate([rsv.choice(np.where(vlab == c)[0], size=min(args.k_shot, int((vlab == c).sum())),
+                                             replace=False) for c in range(n_cls_t)])
+                  for _ in range(args.tr_val_draws)]
+        sc = {}
+        with torch.no_grad():
+            for c in [None] + grid:
+                oas, aas = [], []
+                for sup in vdraws:
+                    st = torch.as_tensor(sup, dtype=torch.long)
+                    P = model.dsspe.evolve(vfeats[st].to(device), val_y[st].to(device), n_cls_t,
+                                           anchors[:n_cls_t].to(device))
+                    if c is not None:
+                        P = refine_prototypes(P, vfeats[st].to(device), val_y[st].to(device), vfeats.to(device), **c)
+                    pr = model.dsspe.classify(vfeats.to(device), P).argmax(-1).cpu().numpy()
+                    q = np.ones(len(vlab), dtype=bool)
+                    q[sup] = False
+                    r_ = classification_report(vlab[q], pr[q], n_cls_t)
+                    oas.append(r_["oa"]); aas.append(r_["aa"])
+                sc[config_name(c)] = (float(np.mean(oas)) + float(np.mean(aas))) / 2
+        pick = max(sc, key=sc.get)
+        tr_sel["map"] = by_name.get(pick)
+        tr_val["map_mean_of_oa_aa"] = sc
+        print(f"  9-class map (validation, mean of OA and AA over {args.tr_val_draws} draws): "
+              f"inductive {100 * sc['inductive']:.2f}%, best {pick} {100 * sc[pick]:.2f}%")
+        history["transductive_validation"] = {"scores": tr_val,
+                                              "selected": {k: config_name(v) for k, v in tr_sel.items()}}
+        timings["transductive_selection_s"] = time.time() - t_tr
+        print()
 
     # ------------------------------------------------------------ evaluation
     print("=" * 64)
@@ -588,14 +657,25 @@ def main():
     t0 = time.time()
     metrics = {}
     for k in sorted({1, args.k_shot}):
+        key = f"{n_way}way_{k}shot"
+        cfg_t = tr_sel.get(key)
         m = evaluate_episodes(
             model, te_x, te_y, n_way, k, args.q_query, anchors, device, n_cls_t,
             n_episodes=args.eval_episodes, seed=10_000 + eval_seed,
+            transductive=[cfg_t] if cfg_t else None,
         )
-        metrics[f"{n_way}way_{k}shot"] = m
+        if args.transductive and key in tr_sel:
+            # the setting chosen on validation; "inductive" when no refinement won there
+            m["transductive_selected"] = dict(m.pop("transductive")[config_name(cfg_t)] if cfg_t else
+                                              {kk: vv for kk, vv in m.items() if kk != "transductive"},
+                                              config=config_name(cfg_t))
+        metrics[key] = m
         print(f"  {n_way}-way {k}-shot: {format_metrics(m)}")
         print("    per-class accuracy: " + ", ".join(
             "-" if a is None else f"{100 * a:.1f}" for a in m.get("per_class_acc", [])))
+        if "transductive_selected" in m:
+            print(f"    transductive ({m['transductive_selected']['config']}): "
+                  f"{format_metrics(m['transductive_selected'])}")
     timings["eval_s"] = time.time() - t0
 
     # ---------------------------------------------------- classification map
@@ -623,6 +703,10 @@ def main():
         H, W = tgt_ds.gt.shape
         cm_sum = np.zeros((n_cls_t, n_cls_t), dtype=np.int64)
         reps, reps_sep = [], []
+        cfg_map = tr_sel.get("map") if "map" in tr_sel else None
+        do_tr = "map" in tr_sel
+        cm_t = np.zeros((n_cls_t, n_cls_t), dtype=np.int64)
+        reps_t, reps_t_sep = [], []
         with torch.no_grad():
             for r in range(args.map_repeats):
                 sup_idx = np.concatenate([
@@ -645,6 +729,14 @@ def main():
                 rep_s = classification_report(te_lab[qs], preds[qs], n_cls_t)
                 rep_s["excluded"] = int((q & near).sum())
                 reps_sep.append(rep_s)
+                if do_tr:   # same supports, prototypes refined on all unlabelled test-region pixels
+                    P_t = protos if cfg_map is None else refine_prototypes(
+                        protos, feats[sup_t].to(device), te_y[sup_t].to(device), feats.to(device), **cfg_map)
+                    preds_t = model.dsspe.classify(feats.to(device), P_t).argmax(-1).cpu().numpy()
+                    rt = classification_report(te_lab[q], preds_t[q], n_cls_t)
+                    reps_t.append(rt)
+                    cm_t += np.array(rt["confusion_matrix"])
+                    reps_t_sep.append(classification_report(te_lab[qs], preds_t[qs], n_cls_t))
                 if r == 0:
                     coords = split["target_te_coords"]
                     pred_map = np.zeros(tgt_ds.gt.shape, dtype=np.int64)
@@ -693,6 +785,33 @@ def main():
         print(f"  queries not sharing input pixels with any support patch "
               f"({ssep['excluded_queries_mean']:.0f} queries per draw excluded): "
               f"OA {100 * so:.2f} ± {100 * ss_:.2f} %   AA {100 * sa:.2f} ± {100 * sas:.2f} %")
+        if do_tr:
+            msd = lambda rs_, key: (float(np.mean([r[key] for r in rs_])),
+                                    float(np.std([r[key] for r in rs_], ddof=1)) if len(rs_) > 1 else 0.0)
+            pooled_t = metrics_from_confusion(cm_t)
+            rec_t = np.array([[np.nan if v is None else v for v in r["per_class"]] for r in reps_t])
+            rec_ts = np.array([[np.nan if v is None else v for v in r["per_class"]] for r in reps_t_sep])
+            (to, tos), (ta, tas), (tk, tks) = msd(reps_t, "oa"), msd(reps_t, "aa"), msd(reps_t, "kappa")
+            (tso, tsos), (tsa, tsas) = msd(reps_t_sep, "oa"), msd(reps_t_sep, "aa")
+            map_summary["transductive"] = {
+                "config": config_name(cfg_map), "oa_mean": to, "oa_sd": tos, "aa_mean": ta, "aa_sd": tas,
+                "kappa_mean": tk, "kappa_sd": tks,
+                "recall_mean": np.nanmean(rec_t, 0).tolist(), "recall_sd": np.nanstd(rec_t, 0, ddof=1).tolist(),
+                "pooled_precision": pooled_t["precision"], "pooled_recall": pooled_t["per_class"],
+                "pooled_f1": pooled_t["f1"], "pooled_confusion": cm_t.tolist(),
+                "support_separated": {"oa_mean": tso, "oa_sd": tsos, "aa_mean": tsa, "aa_sd": tsas,
+                                      "recall_mean": np.nanmean(rec_ts, 0).tolist()},
+            }
+            rown_t = cm_t / np.maximum(cm_t.sum(1, keepdims=True), 1)
+            print(f"\n  TRANSDUCTIVE map ({config_name(cfg_map)}, chosen on validation; same supports): "
+                  f"OA {100 * to:.2f} ± {100 * tos:.2f} %   AA {100 * ta:.2f} ± {100 * tas:.2f} %   κ {tk:.4f}")
+            print(f"  {'class':<22}{'recall':>14}{'prec':>7}{'F1':>7}   row-normalised confusion (%)")
+            for i in range(n_cls_t):
+                print(f"  {cname(i):<22}{100 * np.nanmean(rec_t[:, i]):7.1f} ±{100 * np.nanstd(rec_t[:, i], ddof=1):4.1f}"
+                      f"{100 * (pooled_t['precision'][i] or 0):7.1f}{100 * (pooled_t['f1'][i] or 0):7.1f}   "
+                      + " ".join(f"{100 * v:3.0f}" for v in rown_t[i]))
+            print(f"  transductive, support-separated queries: OA {100 * tso:.2f} ± {100 * tsos:.2f} %   "
+                  f"AA {100 * tsa:.2f} ± {100 * tsas:.2f} %")
 
     timings["total_s"] = time.time() - t_all
 

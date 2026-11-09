@@ -81,6 +81,28 @@ jobs:
                         f"AA {sp['aa_mean']*100:.2f} +/- {sp['aa_sd']*100:.2f}  excluded/draw {sp['excluded_queries_mean']:.0f}  "
                         f"recall {[None if x is None else round(x * 100, 1) for x in sp['recall_mean']]}")
                   print("RESULT map queries per class per draw:", mm.get("query_support_per_draw"))
+              for k, m in s["episodic_metrics"].items():
+                  t = m.get("transductive_selected")
+                  if t:
+                      print(f"RESULT {k} transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_std']*100:.2f}  "
+                            f"AA {t['aa']*100:.2f}  kappa {t['kappa']:.4f}")
+                      print(f"RESULT {k} transductive per-class acc:", [None if a is None else round(a * 100, 1) for a in t.get("per_class_acc", [])])
+              if mm and mm.get("transductive"):
+                  t = mm["transductive"]
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print(f"RESULT map transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_sd']*100:.2f}  "
+                        f"AA {t['aa_mean']*100:.2f} +/- {t['aa_sd']*100:.2f}  kappa {t['kappa_mean']:.4f}")
+                  print("RESULT map transductive recall   :", r1(t["recall_mean"]))
+                  print("RESULT map transductive precision:", r1(t["pooled_precision"]))
+                  print("RESULT map transductive F1       :", r1(t["pooled_f1"]))
+                  print("RESULT map transductive confusion:", t["pooled_confusion"])
+                  ts = t["support_separated"]
+                  print(f"RESULT map transductive, queries sharing no pixels with supports: OA {ts['oa_mean']*100:.2f}  "
+                        f"AA {ts['aa_mean']*100:.2f}  recall {r1(ts['recall_mean'])}")
+              tv = s.get("history", {}).get("transductive_validation")
+              if tv:
+                  print("RESULT transductive validation selected:", tv["selected"])
+                  print("RESULT transductive validation scores:", json.dumps(tv["scores"]))
               print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
           PY
       - uses: actions/upload-artifact@v4

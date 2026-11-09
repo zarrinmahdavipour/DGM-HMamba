@@ -301,3 +301,25 @@ def test_focal_episodic_loss():
     ref = ((1 - torch.exp(-ce)) ** 2 * ce).mean()
     assert torch.allclose(episodic_loss(logits, y, 0.1, focal_gamma=2.0), ref)
     assert episodic_loss(logits, y, 0.1, focal_gamma=2.0) <= plain           # down-weights easy queries
+
+
+def test_transductive_refinement():
+    from dgm_hmamba.transductive import config_name, parse_grid, refine_prototypes
+
+    torch.manual_seed(0)
+    centres = torch.nn.functional.normalize(torch.randn(3, 16), dim=-1)
+    shift = 0.6 * torch.nn.functional.normalize(torch.randn(3, 16), dim=-1)   # the test region looks different
+    unl = torch.cat([centres[c] + shift[c] + 0.05 * torch.randn(200, 16) for c in range(3)])
+    sup = torch.cat([centres[c] + 0.05 * torch.randn(2, 16) for c in range(3)])
+    sy = torch.arange(3).repeat_interleave(2)
+    P0 = torch.stack([sup[sy == c].mean(0) for c in range(3)])
+    assert torch.allclose(refine_prototypes(P0, sup, sy, unl, iters=0), torch.nn.functional.normalize(P0, dim=-1))
+    P = refine_prototypes(P0, sup, sy, unl, iters=3, scale=10.0)
+    target = torch.nn.functional.normalize(centres + shift, dim=-1)
+    before = (torch.nn.functional.normalize(P0, dim=-1) * target).sum(-1)
+    after = (P * target).sum(-1)
+    assert (after > before).all()                       # prototypes move towards the region's class means
+    assert P.shape == P0.shape and torch.allclose(P.norm(dim=-1), torch.ones(3))
+    g = parse_grid("iters=1,3;scale=10;topk=0,5")
+    assert len(g) == 4 and g[0] == {"iters": 1, "scale": 10.0, "topk": 0}
+    assert config_name(None) == "inductive"
