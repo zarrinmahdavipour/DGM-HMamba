@@ -56,14 +56,19 @@ jobs:
           python scripts/demo_real.py $COMMON --output-dir runs/ci_full
           python scripts/demo_real.py $COMMON --output-dir runs/ci_part --stop-after 5
           python scripts/demo_real.py $COMMON --output-dir runs/ci_part --resume runs/ci_part/resume.pt
+          # three parts: stop, resume and stop again, resume
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_part3 --stop-after 3
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_part3 --resume runs/ci_part3/resume.pt --stop-after 6
+          python scripts/demo_real.py $COMMON --output-dir runs/ci_part3 --resume runs/ci_part3/resume.pt
           python - <<'PY'
           import json
           a = json.load(open("runs/ci_full/demo_summary.json"))
-          b = json.load(open("runs/ci_part/demo_summary.json"))
-          for k in ("episodic_metrics", "map_metrics"):
-              assert json.dumps(a[k], sort_keys=True) == json.dumps(b[k], sort_keys=True), k
-          assert a["history"]["validation"] == b["history"]["validation"]
-          assert a["history"]["selected_episode"] == b["history"]["selected_episode"]
+          for part in ("runs/ci_part", "runs/ci_part3"):
+              b = json.load(open(part + "/demo_summary.json"))
+              for k in ("episodic_metrics", "map_metrics"):
+                  assert json.dumps(a[k], sort_keys=True) == json.dumps(b[k], sort_keys=True), (part, k)
+              assert a["history"]["validation"] == b["history"]["validation"], part
+              assert a["history"]["selected_episode"] == b["history"]["selected_episode"], part
           print("stop/resume reproduces the uninterrupted run exactly")
           PY
           python scripts/train.py --data-root data_synthetic --output-dir runs/ci_train \
