@@ -205,7 +205,33 @@ def parse_args():
                    help="patches per forward pass for the map (default 128 on GPU, 64 on CPU)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--preset", choices=sorted(PRESETS), default=None,
+                   help="'verified': the configuration of the verified results in the README "
+                        "(Indian Pines -> Pavia University, spatially independent block split, "
+                        "split seed 5, model seed 42); any other option given overrides it")
+    p.add_argument("--weights", default=None,
+                   help="evaluate a saved model_final.pt instead of training: the settings, the "
+                        "split and the anchors are taken from that run (only --data-root, "
+                        "--output-dir, --download, --device, --map-batch, --no-map apply)")
+    pre, _ = p.parse_known_args()
+    if pre.preset:
+        p.set_defaults(**PRESETS[pre.preset])
     return p.parse_args()
+
+
+# Configuration of the verified results (Round 9, splits/CONFIRMATION_PROTOCOL.md).
+# Diffusion enhancement is bypassed (the manuscript's "w/o Diff" variant).
+PRESETS = {
+    "verified": dict(
+        val_fraction=0.1, val_episodes=40, val_every=100, select_on_val=True,
+        schedule="cosine", warmup_frac=0.05, stage1_iters=800, stage2_lr=2e-3, stage2_steps=2000,
+        train_way=9, train_query=5, augment=True, expand=2, ema=0.99, no_diffusion=True,
+        map_repeats=10, split="block", block_size=64, val_blocks=0.15, min_counts="50,30,100",
+        norm="train", eval_seed=0, split_seed=5, seed=42,
+    ),
+}
+# Options that still apply when --weights evaluates a saved run.
+WEIGHTS_KEEP = ("data_root", "output_dir", "download", "device", "map_batch", "no_map", "weights", "preset")
 
 
 def set_seed(seed: int) -> None:
@@ -299,7 +325,8 @@ def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report,
     return paths
 
 
-RESUME_IGNORED = ("stop_after", "resume", "output_dir", "data_root", "download", "device")
+RESUME_IGNORED = ("stop_after", "resume", "output_dir", "data_root", "download", "device",
+                  "preset", "weights")
 
 
 def _resume_args(args) -> dict:
@@ -321,6 +348,15 @@ def _set_rng_state(state: dict, rng: random.Random) -> None:
 def main():
     use_utf8_stdout()
     args = parse_args()
+    saved = None
+    if args.weights:
+        saved = torch.load(args.weights, map_location="cpu", weights_only=False)
+        for k, v in saved["args"].items():
+            if k not in WEIGHTS_KEEP:
+                setattr(args, k, v)
+        args.stop_after, args.resume = 0, None
+        print(f"Evaluating saved weights {args.weights} (selected episode {saved.get('selected_episode')}); "
+              f"settings and split taken from that run, training skipped.")
     set_seed(args.seed)
     device = torch.device(args.device)
     out_dir = Path(args.output_dir)
@@ -436,6 +472,9 @@ def main():
     skipped = {"stage1": 0, "stage2": 0}   # updates skipped because the loss was not finite
     history["skipped_updates"] = skipped
     ckpt = None
+    if saved is not None:                       # --weights: evaluate a saved run
+        model.load_state_dict(saved["model"])
+        anchors = saved["anchors"]
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if ckpt["args"] != _resume_args(args):
@@ -467,7 +506,7 @@ def main():
     print(f"STAGE 1 – source pre-training + domain-adversarial diffusion ({args.stage1_iters} iters)")
     print("=" * 64)
     opt = AdamW(model.parameters(), lr=cfg.stage1_lr, weight_decay=cfg.weight_decay)
-    stage1_iters = 0 if ckpt is not None else args.stage1_iters   # resumed: Stage 1 already done
+    stage1_iters = 0 if (ckpt is not None or saved is not None) else args.stage1_iters   # resumed or --weights
     warmup = max(1, int(0.15 * args.stage1_iters))   # paper: λ_grl ramps over 30 of 200 epochs
     lr_warm1 = int(args.warmup_frac * args.stage1_iters)
     gen = torch.Generator().manual_seed(args.seed)
@@ -522,6 +561,8 @@ def main():
     best = (-1.0, None, 0)
     ema_model = copy.deepcopy(model) if args.ema > 0 else None
     start, stage2_before = 1, 0.0
+    if saved is not None:
+        start = args.stage2_steps + 1           # --weights: no training
     if ckpt is not None:
         model.load_state_dict(ckpt["model"])
         if ema_model is not None:
@@ -599,9 +640,10 @@ def main():
     if args.select_on_val and best[1] is not None:
         model.load_state_dict(best[1])
         print(f"  using the checkpoint from episode {best[2]} (best validation OA {best[0]*100:.2f}%)")
-    history["selected_episode"] = best[2]
+    history["selected_episode"] = best[2] if saved is None else saved.get("selected_episode")
     n_tail = max(1, len(history["stage2"]) // 10)
-    history["train_acc_last10pct"] = float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
+    history["train_acc_last10pct"] = (float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
+                                      if history["stage2"] else float("nan"))
     torch.save({"model": model.state_dict(), "anchors": anchors, "selected_episode": best[2],
                 "args": vars(args)}, out_dir / "model_final.pt")
     print()

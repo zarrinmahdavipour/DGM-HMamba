@@ -1,0 +1,80 @@
+name: Publish verified weights
+
+# Collects the saved models of the ten verified runs listed in
+# results/verified_ip2pu/runs.txt (Round 9, splits/CONFIRMATION_PROTOCOL.md),
+# checks that the split-5 / seed-42 model reproduces its recorded test results
+# when evaluated from the saved weights, and attaches all ten to the GitHub
+# release named in results/verified_ip2pu/release_tag.txt.
+# Triggered by pushing a branch named publish/<something>.
+on:
+  push:
+    branches: ["publish/**"]
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU PyTorch and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Collect the saved models of the verified runs
+        run: |
+          mkdir -p verified dl
+          while read -r name run; do
+            [ -z "$name" ] && continue
+            id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" \
+                 --jq '[.artifacts[] | select(.name=="experiment-outputs")] | sort_by(.created_at) | last | .id')
+            curl -sSL -H "Authorization: Bearer $GH_TOKEN" -o "dl/$name.zip" \
+                 "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip"
+            mkdir -p "dl/$name" "verified/$name"
+            unzip -q "dl/$name.zip" -d "dl/$name"
+            cp "dl/$name/model_final.pt" "dl/$name/split.json" "dl/$name/demo_summary.json" "verified/$name/"
+            echo "$name: run $run, artifact $id"
+          done < results/verified_ip2pu/runs.txt
+          cp results/verified_ip2pu/per_run.csv verified/
+      - name: Download Indian Pines and Pavia University
+        run: python scripts/prepare_data.py --data-root data --download indian_pines pavia_u
+      - name: Re-evaluate the split-5 / seed-42 model from its saved weights
+        run: |
+          python scripts/demo_real.py --data-root data --output-dir runs/check --device cpu \
+            --weights verified/s5_m42/model_final.pt
+          python - <<'PY'
+          import json
+          rec = json.load(open("verified/s5_m42/demo_summary.json"))
+          new = json.load(open("runs/check/demo_summary.json"))
+          a = json.load(open("verified/s5_m42/split.json"))["split_info"]["index_fingerprint"]
+          b = json.load(open("runs/check/split.json"))["split_info"]["index_fingerprint"]
+          assert a == b, f"split differs: {a} vs {b}"
+          rows = [(k, rec["episodic_metrics"][k]["oa_mean"], new["episodic_metrics"][k]["oa_mean"])
+                  for k in rec["episodic_metrics"]]
+          rows.append(("map", rec["map_metrics"]["oa_mean"], new["map_metrics"]["oa_mean"]))
+          for k, x, y in rows:
+              print(f"{k:12s} recorded OA {100 * x:6.2f}   re-evaluated OA {100 * y:6.2f}")
+              assert abs(x - y) < 0.005, k     # floating-point differences between runners only
+          print("split fingerprint", a, "reproduced; test results reproduced")
+          PY
+      - name: Attach to the release
+        run: |
+          TAG="$(cat results/verified_ip2pu/release_tag.txt)"
+          cd verified && zip -qr "../${TAG}.zip" . && cd ..
+          ls -l "${TAG}.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${TAG}.zip" --clobber
+          else
+            gh release create "$TAG" "${TAG}.zip" --target "$GITHUB_SHA" \
+              --title "Verified demo models (Indian Pines → Pavia University)" \
+              --notes-file results/verified_ip2pu/RELEASE_NOTES.md
+          fi
