@@ -94,9 +94,23 @@ class ConditionalDenoiser(nn.Module):
         self.mid = ResidualBlock(base_ch)
         self.out_norm = nn.GroupNorm(8, base_ch)
         self.out_conv = nn.Conv2d(base_ch, C, 3, padding=1)
+        # Full-rank per-pixel path. The main stack squeezes the C bands
+        # through base_ch << C feature maps, so it cannot predict noise that is
+        # independent across bands. skip(X_t) / sigma_t can (it learns to remove
+        # the low-dimensional spectral signal). It is used only where
+        # sigma_t >= skip_min_sigma, which bounds the 1/sigma amplification and
+        # keeps the reverse chain stable. Zero-initialised.
+        self.skip = nn.Conv2d(C, C, kernel_size=1, bias=False)
+        nn.init.zeros_(self.skip.weight)
+        self.skip_min_sigma = 0.1
 
-        # FiLM-style modulation from time + condition
+        # FiLM-style modulation from time + condition, initialised to the
+        # identity (gamma = 1, beta = 0) so the residual stack starts intact.
         self.film = nn.Linear(base_ch * 4, base_ch * 2)
+        with torch.no_grad():
+            self.film.weight.zero_()
+            self.film.bias.zero_()
+            self.film.bias[:base_ch].fill_(1.0)
 
     def _timestep_embedding(self, t: torch.Tensor, dim: int) -> torch.Tensor:
         half = dim // 2
@@ -106,11 +120,18 @@ class ConditionalDenoiser(nn.Module):
         args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
         return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
 
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        c: torch.Tensor,
+        noise_std: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
-        x_t : (B, C, H, W)
-        t   : (B,) integer timesteps
-        c   : (B, cond_dim)
+        x_t       : (B, C, H, W)
+        t         : (B,) integer timesteps
+        c         : (B, cond_dim)
+        noise_std : (B,) sqrt(1 - alpha_bar_t), a function of t
         """
         temb = self._timestep_embedding(t, self.time_embed[0].in_features)
         temb = self.time_embed(temb) + self.cond_proj(c)          # (B, 4*base)
@@ -125,7 +146,13 @@ class ConditionalDenoiser(nn.Module):
             h = gamma * h + beta
         h = self.mid(h)
         h = F.silu(self.out_norm(h))
-        return self.out_conv(h)
+        out = self.out_conv(h)
+        if noise_std is not None:
+            scale = torch.where(noise_std >= self.skip_min_sigma,
+                                1.0 / noise_std.clamp(min=self.skip_min_sigma),
+                                torch.zeros_like(noise_std))
+            out = out + self.skip(x_t) * scale.view(-1, 1, 1, 1)
+        return out
 
 
 class DADGE(nn.Module):
@@ -167,7 +194,7 @@ class DADGE(nn.Module):
         B = x0.shape[0]
         t = torch.randint(0, self.cfg.T, (B,), device=x0.device, dtype=torch.long)
         x_t, noise = self.q_sample(x0, t)
-        pred = self.denoiser(x_t, t, c)
+        pred = self.denoiser(x_t, t, c, self.sqrt_one_minus_alphas_cumprod[t])
         return F.mse_loss(pred, noise)
 
     def adversarial_loss(
@@ -217,7 +244,7 @@ class DADGE(nn.Module):
 
         for i, t_val in enumerate(times):
             t = torch.full((B,), t_val.item(), device=device, dtype=torch.long)
-            eps = self.denoiser(x, t, c)
+            eps = self.denoiser(x, t, c, self.sqrt_one_minus_alphas_cumprod[t])
             eps_hat = eps  # keep last prediction map
 
             alpha = self.alphas[t]

@@ -20,6 +20,17 @@ class DADGEConfig:
     denoiser_base_channels: int = 64
     denoiser_num_res_blocks: int = 2
     default_inference_steps: int = 50
+    # Ablation "w/o Diff": skip the reverse diffusion and feed X_0 (with a
+    # zero noise map) to HDPM. The denoiser is still trained with L_diff.
+    bypass_enhancement: bool = False
+    # Use the deterministic DDIM update (no fresh noise per step) for the
+    # enhancement reverse chain instead of ancestral DDPM sampling.
+    deterministic_sampling: bool = False
+    # Pass the gradient of the downstream losses (L_cls, L_epi) through the
+    # enhancement to the band projections with a straight-through estimator
+    # (identity Jacobian), so the per-sensor projections are trained by
+    # classification and not only by L_adv. DADGE parameters are unaffected.
+    straight_through: bool = True
 
 
 @dataclass
@@ -32,6 +43,12 @@ class HDPMConfig:
 
     expand_factor: int = 2
     conv_kernel: int = 4
+    # Ablation "w/ CNN": "cnn" replaces HDPM by a residual 3-D CNN
+    # (modules/cnn3d.py). The full model uses "hdpm".
+    encoder: str = "hdpm"
+    # Recompute each Mamba block in the backward pass instead of storing the
+    # scan states (same results, much less memory, ~30 % more compute).
+    grad_checkpoint: bool = False
 
 
 @dataclass
@@ -39,6 +56,10 @@ class DSSPEConfig:
     T_p: int = 5                              # PAPER: evolution steps
     alpha_init: Tuple[float, float, float] = (0.6, 0.2, 0.2)  # PAPER
     anchor_glove_dim: int = 300               # PAPER: GloVe dim
+    # Anchor rows S: "embedding" = Proj(class-name embedding) (PAPER default),
+    # "feature" = initial prototypes P^(0) (PAPER: feature-based initialisation),
+    # "none" = no semantic term, alpha_s = 0 with (alpha_m, alpha_d) re-normalised.
+    anchor_init: str = "embedding"
     contrastive_temp: float = 0.07            # PAPER: tau
 
     momentum_mu: float = 0.9
@@ -47,6 +68,11 @@ class DSSPEConfig:
     gnn_num_layers: int = 2
     edge_dropout_p: float = 0.2
     feature_noise_std: float = 0.05
+    # Scale s applied to the cosine logits in L_epi (softmax over s * cos).
+    # With s = 1 the logits lie in [-1, 1], the softmax is almost uniform and
+    # L_epi stays near ln N with very small gradients. Prediction (arg max)
+    # does not depend on s.
+    logit_scale: float = 10.0
 
 
 @dataclass
@@ -56,6 +82,9 @@ class LossWeights:
     lambda_gcl: float = 0.1
     lambda_diff: float = 0.5
     lambda_adv: float = 0.1
+    # NOT IN PAPER: focal modulation of the episodic loss, (1 - p_t)^gamma;
+    # 0 = plain cross-entropy (the paper's L_epi)
+    focal_gamma: float = 0.0
 
 
 @dataclass

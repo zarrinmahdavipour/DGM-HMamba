@@ -136,9 +136,10 @@ def main():
     tgt_te_x = torch.from_numpy(split["target_te_patches"])
     tgt_te_y = torch.from_numpy(split["target_te_labels"])
 
-    # Semantic anchors (random GloVe-like vectors; replace with real GloVe if available)
+    # Random placeholder anchors (Proj(.) is not trained here). Class-name
+    # embeddings are supported by scripts/demo_real.py (--class-embeddings).
     n_way = min(args.n_way, len(split["target_classes"]))
-    anchors = torch.randn(n_way, cfg.dsspe.anchor_glove_dim)
+    anchors = torch.randn(len(split["target_classes"]), cfg.dsspe.anchor_glove_dim)  # one row per class
 
     # ------------------------------------------------------------------
     # Model
@@ -238,7 +239,7 @@ def main():
             tgt_tr_x, tgt_tr_y, s_idx, q_idx, ep_classes
         )
         # Use a subset of anchors matching the episode classes
-        ep_anchors = anchors[:n_way]
+        ep_anchors = anchors[torch.as_tensor(ep_classes, dtype=torch.long)]
 
         support_x0 = model.project_bands(support_x.to(device), is_source=False)
         query_x0 = model.project_bands(query_x.to(device), is_source=False)
@@ -285,7 +286,8 @@ def main():
         support_x0 = model.project_bands(support_x.to(device), is_source=False)
         query_x0 = model.project_bands(query_x.to(device), is_source=False)
         acc = evaluate_episode(
-            model, support_x0, support_y, query_x0, query_y, n_way, anchors[:n_way], device
+            model, support_x0, support_y, query_x0, query_y, n_way,
+            anchors[torch.as_tensor(ep_classes, dtype=torch.long)], device
         )
         accs.append(acc)
 

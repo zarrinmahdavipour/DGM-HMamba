@@ -67,37 +67,45 @@ class DSSPE(nn.Module):
         semantic_anchors: (N, glove_dim) or already projected (N, d)
         Returns evolved prototypes (N, d)
         """
-        P = self._init_prototypes(support_feats, support_labels, n_way)  # (N, d)
-        bar_P = P.clone()
+        P0 = self._init_prototypes(support_feats, support_labels, n_way)  # (N, d), Eq. proto_init
+        P = P0
+        bar_P = P0.clone()
 
-        # Project anchors if necessary
-        if semantic_anchors.shape[-1] != self.d_model:
-            S = self.anchor_proj(semantic_anchors)  # (N, d)
+        # Semantic anchors S (Eq. semantic). Proj(.) is trained in Stage 1 on the
+        # source classes (when class-name embeddings are given) and is not
+        # updated during episodic training (the manuscript freezes it in Stage 2).
+        mode = getattr(self.cfg, "anchor_init", "embedding")
+        if mode == "feature":                  # s_k = P_k^(0)
+            S = P0.detach()
+        elif semantic_anchors.shape[-1] != self.d_model:
+            with torch.no_grad():
+                S = self.anchor_proj(semantic_anchors)  # (N, d)
         else:
             S = semantic_anchors
         S = F.normalize(S, dim=-1)
 
+        # Graph-Laplacian diffusion operator exp(-eta L) (Eqs. graph_diffusion,
+        # adjacency): non-negative cosine adjacency of the initial prototypes
+        # P^(0), normalized Laplacian, exact matrix exponential.
+        A = torch.clamp(F.cosine_similarity(P0.unsqueeze(1), P0.unsqueeze(0), dim=-1), min=0.0)
+        deg = A.sum(-1).clamp(min=1e-6)
+        D_inv_sqrt = torch.diag(deg.pow(-0.5))
+        L = torch.eye(n_way, device=P0.device, dtype=P0.dtype) - D_inv_sqrt @ A @ D_inv_sqrt
+        diffusion = torch.matrix_exp(-self.cfg.eta_r * L)
+
         alphas = F.softmax(self.fusion_logits, dim=0)  # (3,)
+        if mode == "none":                     # w/o anchors: alpha_s = 0, (alpha_m, alpha_d) re-normalised
+            alphas = torch.cat([alphas[:2] / alphas[:2].sum(), alphas.new_zeros(1)])
 
         for r in range(self.cfg.T_p):
-            # 1) Momentum
+            # 1) Momentum (Eq. momentum)
             bar_P = self.cfg.momentum_mu * bar_P + (1 - self.cfg.momentum_mu) * P
             P_mom = bar_P
 
-            # 2) Graph-Laplacian diffusion on non-negative cosine graph
-            sim = F.cosine_similarity(P.unsqueeze(1), P.unsqueeze(0), dim=-1)
-            A = torch.clamp(sim, min=0.0)
-            A = A - torch.diag(torch.diag(A))  # zero diagonal
-            deg = A.sum(-1).clamp(min=1e-6)
-            D_inv_sqrt = torch.diag(deg.pow(-0.5))
-            L = torch.eye(n_way, device=P.device) - D_inv_sqrt @ A @ D_inv_sqrt
-            # matrix exponential approximation via a few Euler steps
-            P_diff = P
-            eta = self.cfg.eta_r
-            for _ in range(3):
-                P_diff = P_diff - eta * (L @ P_diff)
+            # 2) Graph-Laplacian diffusion (Eq. graph_diffusion)
+            P_diff = diffusion @ P
 
-            # 3) Semantic anchoring
+            # 3) Semantic anchoring (Eq. semantic)
             P_sem = P @ (S.t() @ S)
 
             # Convex fusion

@@ -1,0 +1,247 @@
+name: Experiment in two parts (real data, CPU)
+
+# Like experiment.yml, for runs longer than one CI job: part 1 trains up to the
+# first episode in exp_stop_after.txt and saves an exact resume checkpoint
+# (model, EMA, optimiser, best checkpoint, all random-number states); part 2
+# continues from it with identical arguments, stopping again at the second
+# episode in exp_stop_after.txt if there is one, in which case part 3
+# finishes the run. CI checks that a stopped-and-resumed run equals the
+# uninterrupted run. Triggered by pushing a branch named long/<something>.
+on:
+  push:
+    branches: ["long/**"]
+
+jobs:
+  part1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU PyTorch and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Download Indian Pines and Pavia University
+        run: python scripts/prepare_data.py --data-root data --download indian_pines pavia_u
+      - name: Real-data demo, part 1
+        run: |
+          EXTRA="$(cat exp_args.txt)"
+          STOP="$(awk '{print $1}' exp_stop_after.txt)"
+          echo "extra args: $EXTRA | stop after episode $STOP"
+          python scripts/demo_real.py --data-root data --output-dir runs/exp --device cpu $EXTRA --stop-after $STOP
+          test -f runs/exp/resume.pt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part1
+          path: runs/exp/
+          retention-days: 30
+
+  part2:
+    needs: part1
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      more: ${{ steps.run2.outputs.more }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU PyTorch and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Download Indian Pines and Pavia University
+        run: python scripts/prepare_data.py --data-root data --download indian_pines pavia_u
+      - uses: actions/download-artifact@v4
+        with:
+          name: part1
+          path: runs/exp/
+      - name: Real-data demo, part 2
+        id: run2
+        run: |
+          EXTRA="$(cat exp_args.txt)"
+          STOP2="$(awk '{print $2}' exp_stop_after.txt)"
+          if [ -n "$STOP2" ]; then
+            echo "extra args: $EXTRA | resuming, stop after episode $STOP2"
+            python scripts/demo_real.py --data-root data --output-dir runs/exp --device cpu $EXTRA --resume runs/exp/resume.pt --stop-after $STOP2
+            echo "more=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "extra args: $EXTRA | resuming"
+            python scripts/demo_real.py --data-root data --output-dir runs/exp --device cpu $EXTRA --resume runs/exp/resume.pt
+            echo "more=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: steps.run2.outputs.more == 'true'
+        with:
+          name: part2
+          path: runs/exp/
+          retention-days: 30
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          p = "runs/exp/demo_summary.json"
+          if os.path.exists(p):
+              s = json.load(open(p))
+              for k, m in s["episodic_metrics"].items():
+                  print(f"RESULT {k}: OA {m['oa_mean']*100:.2f} +/- {m['oa_std']*100:.2f}  AA {m['aa']*100:.2f}  kappa {m['kappa']:.4f}")
+                  print(f"RESULT {k} per-class acc:", [None if a is None else round(a * 100, 1) for a in m.get("per_class_acc", [])])
+              mm = s.get("map_metrics")
+              if mm:
+                  print(f"RESULT map ({mm['repeats']} draws): OA {mm['oa_mean']*100:.2f} +/- {mm['oa_sd']*100:.2f}  "
+                        f"AA {mm['aa_mean']*100:.2f} +/- {mm['aa_sd']*100:.2f}  kappa {mm['kappa_mean']:.4f}")
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print("RESULT map recall   :", r1(mm["recall_mean"]))
+                  print("RESULT map precision:", r1(mm["pooled_precision"]))
+                  print("RESULT map F1       :", r1(mm["pooled_f1"]))
+                  print("RESULT map confusion:", mm["pooled_confusion"])
+              h = s["history"]
+              print("RESULT validation", {k: round(v * 100, 2) for k, v in h.get("validation", {}).items()})
+              print("RESULT train acc (last 10% of episodes):", round(h.get("train_acc_last10pct", 0) * 100, 2),
+                    "| selected episode:", h.get("selected_episode"),
+                    "| skipped non-finite updates:", h.get("skipped_updates"))
+              si = s.get("split_info", {})
+              print("RESULT seeds", s.get("seeds"))
+              hide = ("leakage", "leakage_train_val", "block_grid", "block_grid_labelled", "class_counts", "pool_class_counts")
+              print("RESULT split", {k: v for k, v in si.items() if k not in hide})
+              print("RESULT split leakage train-test", si.get("leakage"), "| train-val", si.get("leakage_train_val"))
+              if si.get("block_grid"):
+                  print("RESULT block grid (0 train, 1 val, 2 test)", " ".join(si["block_grid"]))
+              print("RESULT pool class counts", si.get("pool_class_counts"))
+              if mm and mm.get("support_separated"):
+                  sp = mm["support_separated"]
+                  print(f"RESULT map, queries sharing no pixels with supports: OA {sp['oa_mean']*100:.2f} +/- {sp['oa_sd']*100:.2f}  "
+                        f"AA {sp['aa_mean']*100:.2f} +/- {sp['aa_sd']*100:.2f}  excluded/draw {sp['excluded_queries_mean']:.0f}  "
+                        f"recall {[None if x is None else round(x * 100, 1) for x in sp['recall_mean']]}")
+                  print("RESULT map queries per class per draw:", mm.get("query_support_per_draw"))
+              for k, m in s["episodic_metrics"].items():
+                  t = m.get("transductive_selected")
+                  if t:
+                      print(f"RESULT {k} transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_std']*100:.2f}  "
+                            f"AA {t['aa']*100:.2f}  kappa {t['kappa']:.4f}")
+                      print(f"RESULT {k} transductive per-class acc:", [None if a is None else round(a * 100, 1) for a in t.get("per_class_acc", [])])
+              if mm and mm.get("transductive"):
+                  t = mm["transductive"]
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print(f"RESULT map transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_sd']*100:.2f}  "
+                        f"AA {t['aa_mean']*100:.2f} +/- {t['aa_sd']*100:.2f}  kappa {t['kappa_mean']:.4f}")
+                  print("RESULT map transductive recall   :", r1(t["recall_mean"]))
+                  print("RESULT map transductive precision:", r1(t["pooled_precision"]))
+                  print("RESULT map transductive F1       :", r1(t["pooled_f1"]))
+                  print("RESULT map transductive confusion:", t["pooled_confusion"])
+                  ts = t["support_separated"]
+                  print(f"RESULT map transductive, queries sharing no pixels with supports: OA {ts['oa_mean']*100:.2f}  "
+                        f"AA {ts['aa_mean']*100:.2f}  recall {r1(ts['recall_mean'])}")
+              tv = s.get("history", {}).get("transductive_validation")
+              if tv:
+                  print("RESULT transductive validation selected:", tv["selected"])
+                  print("RESULT transductive validation scores:", json.dumps(tv["scores"]))
+              print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.run2.outputs.more != 'true'
+        with:
+          name: experiment-outputs
+          path: runs/exp/
+
+  part3:
+    needs: part2
+    if: needs.part2.outputs.more == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU PyTorch and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Download Indian Pines and Pavia University
+        run: python scripts/prepare_data.py --data-root data --download indian_pines pavia_u
+      - uses: actions/download-artifact@v4
+        with:
+          name: part2
+          path: runs/exp/
+      - name: Real-data demo, part 3
+        run: |
+          EXTRA="$(cat exp_args.txt)"
+          echo "extra args: $EXTRA | resuming"
+          python scripts/demo_real.py --data-root data --output-dir runs/exp --device cpu $EXTRA --resume runs/exp/resume.pt
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          p = "runs/exp/demo_summary.json"
+          if os.path.exists(p):
+              s = json.load(open(p))
+              for k, m in s["episodic_metrics"].items():
+                  print(f"RESULT {k}: OA {m['oa_mean']*100:.2f} +/- {m['oa_std']*100:.2f}  AA {m['aa']*100:.2f}  kappa {m['kappa']:.4f}")
+                  print(f"RESULT {k} per-class acc:", [None if a is None else round(a * 100, 1) for a in m.get("per_class_acc", [])])
+              mm = s.get("map_metrics")
+              if mm:
+                  print(f"RESULT map ({mm['repeats']} draws): OA {mm['oa_mean']*100:.2f} +/- {mm['oa_sd']*100:.2f}  "
+                        f"AA {mm['aa_mean']*100:.2f} +/- {mm['aa_sd']*100:.2f}  kappa {mm['kappa_mean']:.4f}")
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print("RESULT map recall   :", r1(mm["recall_mean"]))
+                  print("RESULT map precision:", r1(mm["pooled_precision"]))
+                  print("RESULT map F1       :", r1(mm["pooled_f1"]))
+                  print("RESULT map confusion:", mm["pooled_confusion"])
+              h = s["history"]
+              print("RESULT validation", {k: round(v * 100, 2) for k, v in h.get("validation", {}).items()})
+              print("RESULT train acc (last 10% of episodes):", round(h.get("train_acc_last10pct", 0) * 100, 2),
+                    "| selected episode:", h.get("selected_episode"),
+                    "| skipped non-finite updates:", h.get("skipped_updates"))
+              si = s.get("split_info", {})
+              print("RESULT seeds", s.get("seeds"))
+              hide = ("leakage", "leakage_train_val", "block_grid", "block_grid_labelled", "class_counts", "pool_class_counts")
+              print("RESULT split", {k: v for k, v in si.items() if k not in hide})
+              print("RESULT split leakage train-test", si.get("leakage"), "| train-val", si.get("leakage_train_val"))
+              if si.get("block_grid"):
+                  print("RESULT block grid (0 train, 1 val, 2 test)", " ".join(si["block_grid"]))
+              print("RESULT pool class counts", si.get("pool_class_counts"))
+              if mm and mm.get("support_separated"):
+                  sp = mm["support_separated"]
+                  print(f"RESULT map, queries sharing no pixels with supports: OA {sp['oa_mean']*100:.2f} +/- {sp['oa_sd']*100:.2f}  "
+                        f"AA {sp['aa_mean']*100:.2f} +/- {sp['aa_sd']*100:.2f}  excluded/draw {sp['excluded_queries_mean']:.0f}  "
+                        f"recall {[None if x is None else round(x * 100, 1) for x in sp['recall_mean']]}")
+                  print("RESULT map queries per class per draw:", mm.get("query_support_per_draw"))
+              for k, m in s["episodic_metrics"].items():
+                  t = m.get("transductive_selected")
+                  if t:
+                      print(f"RESULT {k} transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_std']*100:.2f}  "
+                            f"AA {t['aa']*100:.2f}  kappa {t['kappa']:.4f}")
+                      print(f"RESULT {k} transductive per-class acc:", [None if a is None else round(a * 100, 1) for a in t.get("per_class_acc", [])])
+              if mm and mm.get("transductive"):
+                  t = mm["transductive"]
+                  r1 = lambda xs: [None if x is None else round(x * 100, 1) for x in xs]
+                  print(f"RESULT map transductive ({t['config']}): OA {t['oa_mean']*100:.2f} +/- {t['oa_sd']*100:.2f}  "
+                        f"AA {t['aa_mean']*100:.2f} +/- {t['aa_sd']*100:.2f}  kappa {t['kappa_mean']:.4f}")
+                  print("RESULT map transductive recall   :", r1(t["recall_mean"]))
+                  print("RESULT map transductive precision:", r1(t["pooled_precision"]))
+                  print("RESULT map transductive F1       :", r1(t["pooled_f1"]))
+                  print("RESULT map transductive confusion:", t["pooled_confusion"])
+                  ts = t["support_separated"]
+                  print(f"RESULT map transductive, queries sharing no pixels with supports: OA {ts['oa_mean']*100:.2f}  "
+                        f"AA {ts['aa_mean']*100:.2f}  recall {r1(ts['recall_mean'])}")
+              tv = s.get("history", {}).get("transductive_validation")
+              if tv:
+                  print("RESULT transductive validation selected:", tv["selected"])
+                  print("RESULT transductive validation scores:", json.dumps(tv["scores"]))
+              print("RESULT params", s["trainable_parameters"], "| timings", {k: round(v, 2) for k, v in s["timings_s"].items()})
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: experiment-outputs
+          path: runs/exp/
