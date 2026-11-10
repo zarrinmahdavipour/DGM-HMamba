@@ -41,7 +41,7 @@ These are demo-scale results on one transfer task. They are **not** the results 
 
 ### Reproduce
 
-**Evaluate the saved models** (no training; a few minutes on a GPU, about 20 minutes per model on a CPU). The ten models are attached to the release [`verified-ip2pu-v1`](https://github.com/zarrinmahdavipour/DGM-HMamba/releases/tag/verified-ip2pu-v1); each file carries its settings and split seed:
+**Evaluate the saved models** (no training; a few minutes on a GPU, about 20 minutes per model on a 4-core CPU and 30–60 minutes on Colab's CPU, most of it for the 9-class map; `--no-map` skips the map). The ten models are attached to the release [`verified-ip2pu-v1`](https://github.com/zarrinmahdavipour/DGM-HMamba/releases/tag/verified-ip2pu-v1); each file carries its settings and split seed:
 
 ```bash
 curl -LO https://github.com/zarrinmahdavipour/DGM-HMamba/releases/download/verified-ip2pu-v1/verified-ip2pu-v1.zip
@@ -61,7 +61,7 @@ Any option given after `--preset` overrides it. Results differ slightly from run
 
 ## Quick demo
 
-**In the browser:** open the [Colab notebook](https://colab.research.google.com/github/zarrinmahdavipour/DGM-HMamba/blob/main/notebooks/DGM_HMamba_demo.ipynb), choose *Runtime → Change runtime type → T4 GPU*, and *Run all*. It runs the smoke tests, downloads the two scenes, evaluates a verified model on its test region and draws the classification map; training the verified configuration from scratch is an optional, longer step.
+**In the browser:** open the [Colab notebook](https://colab.research.google.com/github/zarrinmahdavipour/DGM-HMamba/blob/main/notebooks/DGM_HMamba_demo.ipynb), choose *Runtime → Change runtime type → T4 GPU*, and *Run all*. It runs the smoke tests, downloads the two scenes, evaluates a verified model on its test region and draws the classification map; training the verified configuration from scratch is an optional, longer step. Without a GPU the notebook evaluates the few-shot episodes only and says so (the map would take 30–60 minutes on Colab's CPU).
 
 **Locally:**
 
