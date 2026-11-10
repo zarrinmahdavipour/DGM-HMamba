@@ -264,7 +264,8 @@ def false_colour(cube: np.ndarray) -> np.ndarray:
     return np.clip((rgb - lo) / max(hi - lo, 1e-6), 0, 1)
 
 
-def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report, title):
+def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report, title,
+                 map_heading="9-class map", results_line=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -290,7 +291,7 @@ def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report,
         axes[1].set_title("Ground truth")
         axes[2].imshow(pred_map, cmap=cmap, vmin=0, vmax=n, interpolation="nearest")
         axes[2].set_title(
-            "DGM-HMamba demo (meta-testing pool)\n"
+            f"{map_heading}\n"
             f"OA {map_report['oa']*100:.1f}%  AA {map_report['aa']*100:.1f}%  "
             f"κ {map_report['kappa']:.3f}"
         )
@@ -299,8 +300,12 @@ def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report,
         handles = [Patch(color=cmap(i + 1), label=names[c - 1] if c - 1 < len(names) else str(c))
                    for i, c in enumerate(target_classes)]
         fig.legend(handles=handles, loc="lower center", ncol=min(n, 5), fontsize=9, frameon=False)
-        fig.suptitle(title, fontsize=11)
-        fig.tight_layout(rect=(0, 0.1, 1, 0.95))
+        fig.suptitle(title, fontsize=10, y=0.985)
+        top = 0.95
+        if results_line:
+            fig.text(0.5, 0.925, results_line, ha="center", va="center", fontsize=12, fontweight="bold")
+            top = 0.89
+        fig.tight_layout(rect=(0, 0.1, 1, top))
         p = Path(out_dir) / "demo_maps.png"
         fig.savefig(p, dpi=130)
         plt.close(fig)
@@ -942,10 +947,23 @@ def main():
     timings["total_s"] = time.time() - t_all
 
     # --------------------------------------------------------------- outputs
-    title = (f"DGM-HMamba demo: {args.source} → {args.target} | {n_params/1e6:.2f} M-param demo model, "
-             f"{args.stage1_iters} + {args.stage2_steps} iterations (not the paper configuration)")
+    scene = {"indian_pines": "Indian Pines", "pavia_u": "Pavia University", "pavia_c": "Pavia Centre",
+             "salinas": "Salinas", "houston2013": "Houston 2013"}
+    pool = "test region" if args.split == "block" else "meta-testing pool"
+    shots = sorted(metrics, key=lambda name: -int(name.split("way_")[1].split("shot")[0]))   # 5-shot first
+    parts = [f"{name.replace('way_', '-way ').replace('shot', '-shot')}: OA {100 * metrics[name]['oa_mean']:.1f}%  "
+             f"AA {100 * metrics[name]['aa']:.1f}%" for name in shots]
+    if map_report is not None:
+        parts.append(f"{n_cls_t}-class map: OA {100 * map_report['oa']:.1f}%  AA {100 * map_report['aa']:.1f}%")
+    results_line = f"Results on the {pool}:   " + "   |   ".join(parts)
+    title = (f"DGM-HMamba demo: {scene.get(args.source, args.source)} → {scene.get(args.target, args.target)} | "
+             f"{n_params/1e6:.2f} M-param demo model, {args.stage1_iters} + {args.stage2_steps} iterations "
+             f"(not the paper configuration)")
+    map_heading = (f"{n_cls_t}-class map of the {pool}\n"
+                   f"({args.k_shot} labelled pixels per class; all other pixels classified)")
     try:
-        figs = save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report, title)
+        figs = save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report, title, map_heading,
+                            results_line)
         for f in figs:
             print(f"  figure → {f}")
     except ImportError:
