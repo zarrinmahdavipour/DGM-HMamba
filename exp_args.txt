@@ -1,0 +1,1 @@
+--preset verified --stage2-steps 0 --class-embeddings class_embeddings/glove.6B.300d.json --support-free --split-seed 5 --seed 42
