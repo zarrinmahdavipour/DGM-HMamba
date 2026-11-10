@@ -323,3 +323,33 @@ def test_transductive_refinement():
     g = parse_grid("iters=1,3;scale=10;topk=0,5")
     assert len(g) == 4 and g[0] == {"iters": 1, "scale": 10.0, "topk": 0}
     assert config_name(None) == "inductive"
+
+
+def test_ablation_switches():
+    """w/ CNN encoder, w/o Dyn (static prototypes) and the loss-weight switches."""
+    torch.manual_seed(0)
+    cfg = tiny_cfg(patch=7)
+    cfg.hdpm.encoder = "cnn"
+    cfg.dadge.bypass_enhancement = True
+    cfg.dsspe.T_p = 0
+    m = DGMHMamba(cfg, source_bands=12, target_bands=8, num_source_classes=4)
+    assert not any("levels" in n for n, _ in m.named_parameters())       # no HDPM inside
+    x = m.project_bands(torch.randn(6, 8, 7, 7), is_source=False)
+    f = m.encode(x)
+    assert f.shape == (6, cfg.hdpm.widths[-1])
+    sy = torch.arange(3).repeat_interleave(2)
+    anchors = torch.randn(3, cfg.dsspe.anchor_glove_dim)
+    P = m.dsspe.evolve(f, sy, 3, anchors)
+    assert torch.allclose(P, torch.stack([f[sy == c].mean(0) for c in range(3)]))   # static class means
+    l_epi, l_gcl, _ = m.stage2_episode(x, sy, x, sy, 3, anchors)
+    total_objective_stage2(l_epi, l_gcl, m.cfg.loss).backward()
+    assert m.hdpm.block1.c1.weight.grad is not None
+    # Stage 1 with lambda_adv = 0: the adversarial loss no longer reaches the target band projection
+    cfg.loss.lambda_adv = 0.0
+    m.zero_grad()
+    xs = m.project_bands(torch.randn(4, 12, 7, 7), is_source=True)
+    xt = m.project_bands(torch.randn(4, 8, 7, 7), is_source=False)
+    l_cls, l_diff, l_adv = m.stage1_losses(xs, torch.tensor([0, 1, 2, 3]), xt, 1.0)
+    total_objective_stage1(l_cls, l_diff, l_adv, m.cfg.loss).backward()
+    g = m.target_band_proj.proj.weight.grad
+    assert g is None or torch.count_nonzero(g) == 0

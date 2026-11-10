@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from .config import DGMHMambaConfig
 from .modules import BandProjection, DADGE, HDPM, DSSPE, graph_contrastive_loss
+from .modules.cnn3d import CNN3DEncoder
 from .losses import (
     SourceClassifierHead,
     source_classification_loss,
@@ -29,7 +30,12 @@ class DGMHMamba(nn.Module):
         self.target_band_proj = BandProjection(target_bands, C)
 
         self.dadge = DADGE(cfg.dadge)
-        self.hdpm = HDPM(cfg.hdpm, c_bands=C)
+        if cfg.hdpm.encoder == "cnn":   # ablation "w/ CNN"
+            self.hdpm = CNN3DEncoder(cfg.hdpm.widths[-1])
+        elif cfg.hdpm.encoder == "hdpm":
+            self.hdpm = HDPM(cfg.hdpm, c_bands=C)
+        else:
+            raise ValueError(f"unknown encoder {cfg.hdpm.encoder!r}")
         self.dsspe = DSSPE(cfg.dsspe, d_model=cfg.hdpm.widths[-1])
         self.source_head = SourceClassifierHead(cfg.hdpm.widths[-1], num_source_classes)
 

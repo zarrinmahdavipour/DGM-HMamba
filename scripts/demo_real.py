@@ -83,6 +83,14 @@ def demo_config(args):
     cfg.dadge.deterministic_sampling = args.ddim
     if args.lambda_gcl is not None:
         cfg.loss.lambda_gcl = args.lambda_gcl
+    if args.lambda_diff is not None:
+        cfg.loss.lambda_diff = args.lambda_diff
+    if args.lambda_adv is not None:
+        cfg.loss.lambda_adv = args.lambda_adv
+    if args.static_prototypes:          # ablation "w/o Dyn": plain class means, no L_gcl
+        cfg.dsspe.T_p = 0
+        cfg.loss.lambda_gcl = 0.0
+    cfg.hdpm.encoder = args.encoder
     cfg.loss.focal_gamma = args.focal_gamma
     return cfg
 
@@ -141,6 +149,13 @@ def parse_args():
     p.add_argument("--val-every", type=int, default=0,
                    help="validate every N Stage-2 episodes (needs --val-fraction)")
     p.add_argument("--lambda-gcl", type=float, default=None, help="default: config (0.1)")
+    p.add_argument("--lambda-diff", type=float, default=None, help="default: config (0.5)")
+    p.add_argument("--lambda-adv", type=float, default=None,
+                   help="default: config (0.1); 0 removes the domain-adversarial alignment")
+    p.add_argument("--static-prototypes", action="store_true",
+                   help="ablation w/o Dyn: class-mean prototypes (T_p = 0) and no L_gcl")
+    p.add_argument("--encoder", choices=["hdpm", "cnn"], default="hdpm",
+                   help="ablation w/ CNN: replace HDPM by a residual 3-D CNN")
     p.add_argument("--focal-gamma", type=float, default=0.0,
                    help="focal modulation of the episodic loss (0 = plain cross-entropy)")
     p.add_argument("--ddim", action="store_true",

@@ -44,6 +44,11 @@ jobs:
           assert s["history"]["transductive_validation"]["selected"]
           print("transductive results present; chosen on validation:", s["history"]["transductive_validation"]["selected"])
           PY
+          python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_ablation \
+            --patch-size 5 --stage1-iters 2 --stage2-steps 2 --eval-episodes 2 --device cpu \
+            --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \
+            --q-query 2 --train-query 2 --val-episodes 2 --map-repeats 2 --no-diffusion \
+            --encoder cnn --static-prototypes --lambda-adv 0 --lambda-diff 0
           python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo_geo2 \
             --patch-size 5 --stage1-iters 2 --stage2-steps 2 --eval-episodes 2 --device cpu \
             --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \

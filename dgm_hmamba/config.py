@@ -43,6 +43,9 @@ class HDPMConfig:
 
     expand_factor: int = 2
     conv_kernel: int = 4
+    # Ablation "w/ CNN": "cnn" replaces HDPM by a residual 3-D CNN
+    # (modules/cnn3d.py). The full model uses "hdpm".
+    encoder: str = "hdpm"
     # Recompute each Mamba block in the backward pass instead of storing the
     # scan states (same results, much less memory, ~30 % more compute).
     grad_checkpoint: bool = False
