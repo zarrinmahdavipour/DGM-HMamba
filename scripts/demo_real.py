@@ -264,6 +264,16 @@ def false_colour(cube: np.ndarray) -> np.ndarray:
     return np.clip((rgb - lo) / max(hi - lo, 1e-6), 0, 1)
 
 
+def _progress(done, total, t0, label):
+    """Progress line about every 10 % of `total`, so that long CPU steps do not look stalled."""
+    step = max(1, total // 10)
+    if done % step and done != total:
+        return
+    el = time.time() - t0
+    left = el / max(done, 1) * (total - done)
+    print(f"    {label}: {done}/{total} patches, {el:.0f} s elapsed, about {left:.0f} s left", flush=True)
+
+
 def save_figures(out_dir, tgt_ds, target_classes, pred_map, history, map_report, title,
                  map_heading="9-class map", results_line=None):
     import matplotlib
@@ -593,7 +603,8 @@ def main():
     if ckpt is None:
         timings["stage1_s"] = time.time() - t0
         print(f"  Stage 1 done in {timings['stage1_s']:.0f} s")
-        validate("after Stage 1")
+        if saved_run is None:               # --weights: nothing was trained, nothing to validate
+            validate("after Stage 1")
     print()
 
     # --------------------------------------------------------------- stage 2
@@ -685,7 +696,7 @@ def main():
     print(f"  Stage 2 done in {timings['stage2_s']:.0f} s")
     if ema_model is not None:
         model.load_state_dict(ema_model.state_dict())   # evaluate the EMA weights
-    v = validate("after Stage 2")
+    v = validate("after Stage 2") if saved_run is None else None
     if v is not None and v > best[0]:
         best = (v, None, args.stage2_steps)
     if args.select_on_val and best[1] is not None:
@@ -703,9 +714,11 @@ def main():
         model.eval()
         out = []
         bsz = args.map_batch or (128 if device.type == "cuda" else 64)
+        t_e = time.time()
         with torch.no_grad():
             for b in range(0, len(x), bsz):
                 out.append(model.encode(model.project_bands(x[b:b + bsz].to(device), is_source=False)).cpu())
+                _progress(min(b + bsz, len(x)), len(x), t_e, "encoding")
         return torch.cat(out)
 
     # transductive settings are chosen on the validation pool only
@@ -767,6 +780,7 @@ def main():
     for k in sorted({1, args.k_shot}):
         key = f"{n_way}way_{k}shot"
         cfg_t = tr_sel.get(key)
+        print(f"  running {args.eval_episodes} test episodes, {n_way}-way {k}-shot ...", flush=True)
         m = evaluate_episodes(
             model, te_x, te_y, n_way, k, args.q_query, anchors, device, n_cls_t,
             n_episodes=args.eval_episodes, seed=10_000 + eval_seed,
@@ -800,10 +814,13 @@ def main():
         bs = args.map_batch or (128 if device.type == "cuda" else 64)
         feats = []
         t_enc = time.time()
+        print(f"  encoding all {len(te_lab)} pixels of the {'test region' if args.split == 'block' else 'pool'} "
+              f"on {device.type} (the longest step on a CPU) ...", flush=True)
         with torch.no_grad():
             for b in range(0, len(te_lab), bs):
                 xb = te_x[b:b + bs].to(device)
                 feats.append(model.encode(model.project_bands(xb, is_source=False)).cpu())
+                _progress(min(b + bs, len(te_lab)), len(te_lab), t_enc, "encoding")
         feats = torch.cat(feats)
         timings["inference_ms_per_patch"] = 1000 * (time.time() - t_enc) / len(te_lab)
         rs = np.random.RandomState(eval_seed)
