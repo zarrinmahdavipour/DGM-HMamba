@@ -34,7 +34,8 @@ What this configuration is (`--preset verified`):
 
 * the manuscript's **"w/o Diff" variant**: the diffusion enhancement is bypassed and HDPM receives a zero noise map (the denoiser is still trained but not used); the domain-adversarial alignment, HDPM and DSSPE are on;
 * training additions that are not in the manuscript: 800 Stage-1 iterations and 2,000 Stage-2 episodes, 9-way training episodes with 5 queries per class, flips/rotations/spectral-scaling/noise augmentation, cosine learning-rate schedule with warm-up (Stage-2 learning rate 2 × 10⁻³), exponential moving average of the weights (0.99), and checkpoint selection on the validation region;
-* demo-size model: widths 32/32/32, one block per level, state size 4, 7 × 7 patches.
+* demo-size model: widths 32/32/32, one block per level, state size 4, 7 × 7 patches;
+* **semantic anchors: random placeholder vectors**, not class-name embeddings (see [Class-name embeddings](#class-name-embeddings-semantic-anchors)). The semantic term of DSSPE therefore carries no class-name information in these results.
 
 These are demo-scale results on one transfer task. They are **not** the results reported in the manuscript, which uses the paper-size model, pixel-level meta-training/meta-testing pools and four transfer tasks.
 
@@ -79,6 +80,26 @@ The short run (≈0.5 M parameters, 200 Stage-1 iterations, 100 episodes, pixel-
 Ablation switches of `demo_real.py`: `--no-diffusion` (w/o Diff), `--encoder cnn` (HDPM replaced by a residual 3-D CNN), `--static-prototypes` (class-mean prototypes, no L_gcl), `--lambda-adv 0` (no domain-adversarial alignment), `--lambda-diff`, `--lambda-gcl`.
 
 On Windows the scripts switch the console to UTF-8 themselves, so no `PYTHONIOENCODING` setting is needed.
+
+## Class-name embeddings (semantic anchors)
+
+**Status.** The manuscript initialises each DSSPE anchor from the 300-d GloVe vector of the class name, s_k = Proj(e_k), trains Proj on the source classes in Stage 1, and uses the same anchors for *label-free, support-free cross-scene* classification, ŷ = argmax_k cos(f, s_k) (its cross-scene table and the support-free column of its anchor ablation). Up to release `verified-ip2pu-v1` the code had **no class-name embeddings**: every script used random placeholder vectors and Proj was never trained. Those experiments therefore **cannot be reproduced from this repository**, and they have not been reproduced with the code added since. All verified results above use the random placeholders.
+
+**What the code now provides.** `--class-embeddings FILE` loads one vector per class name; Stage 1 then trains Proj with an additional loss L_sem, Proj is frozen in Stage 2, and `--support-free` evaluates the support-free rule on the test region (label-free only together with `--stage2-steps 0`). `--anchor-init {embedding,feature,none}` selects the manuscript's three anchor variants (embedding-based, feature-based s_k = P_k^(0), and no semantic term with α_s = 0).
+
+```bash
+# GloVe 6B (https://nlp.stanford.edu/projects/glove/, Public Domain Dedication and License)
+python scripts/make_class_embeddings.py --glove glove.6B.300d.txt --out class_embeddings/glove.6B.300d.json
+python scripts/demo_real.py --download --preset verified --class-embeddings class_embeddings/glove.6B.300d.json
+python scripts/demo_real.py --download --preset verified --stage2-steps 0 \
+    --class-embeddings class_embeddings/glove.6B.300d.json --support-free      # no target label used
+```
+
+**Choices that the manuscript does not specify** (they may differ from the authors' and should be replaced by theirs if known):
+
+* the GloVe release (`class-embeddings.yml` builds the file from GloVe 6B, 300-d);
+* how a multi-word or abbreviated class name becomes one vector: lower-cased word tokens, a few explicit replacements (`notill` → "no till", `mintill` → "minimum till", `vinyard` → "vineyard", `brocoli` → "broccoli", `4wk` → "four weeks", …; `TOKEN_ALIASES` in `dgm_hmamba/data/class_embeddings.py`), then the mean of the in-vocabulary token vectors; out-of-vocabulary tokens are recorded in the file;
+* the loss that trains Proj: L_sem is the cross-entropy of the scaled cosine similarities (scale 10) between the source embeddings and the projected class-name vectors of all source classes, added to the Stage-1 objective with weight `--lambda-sem` (default 1).
 
 ---
 
@@ -157,12 +178,14 @@ dgm_hmamba/
   augment.py         patch augmentation used in the verified configuration
   transductive.py    optional transductive prototype refinement (not used for any reported result)
   modules/           band_proj, dadge, mamba_block, hdpm, dsspe, cnn3d (ablation encoder)
-  data/              .mat loaders, patch extraction, pixel-level and geographic block splits, downloader
+  data/              .mat loaders, patch extraction, pixel-level and geographic block splits, downloader,
+                     class-name embeddings (class_embeddings.py)
 scripts/
   demo_forward.py    synthetic smoke test
   demo_train.py      synthetic two-stage training demo
   demo_real.py       real-data runs (Indian Pines -> Pavia University), --preset verified, --weights
   make_splits.py     writes the block assignments in splits/
+  make_class_embeddings.py   builds the class-name embedding file from a GloVe text file
   prepare_data.py    download / check datasets
   train.py           full two-stage training and evaluation (pixel-level pools)
   train_cross_domain.py   lighter training script
@@ -182,7 +205,7 @@ tests/               pytest smoke tests and a synthetic-data generator (used by 
 This is a clean re-implementation. Saved models and per-run results are included for the verified demo configuration only, not for the manuscript's experiments. The following points differ from the manuscript text:
 
 1. **Model size and speed.** With the manuscript configuration in `config.py` the model has about 43.5 M trainable parameters (HDPM ≈ 42.2 M), whereas the manuscript reports 8.6 M. The selective scan in `mamba_block.py` is a sequential PyTorch loop without the `mamba-ssm` CUDA kernels, so runtime and memory are far higher than the per-patch latency reported in the manuscript.
-2. **Semantic anchors.** GloVe class-name anchors are not implemented yet; the scripts use fixed random placeholder vectors (class names are listed in `data/datasets.py`), and the anchor projection is not trained. The support-free cross-scene experiment cannot be reproduced with this release, and the PCA band projection for unseen sensors is not implemented.
+2. **Semantic anchors.** Class-name embeddings are optional (`--class-embeddings`, see [Class-name embeddings](#class-name-embeddings-semantic-anchors)); without them the anchors are random placeholder vectors, as in all verified results, and `train.py` / `train_cross_domain.py` still use placeholders only. The GloVe release, the handling of compound class names and the loss that trains Proj are not given in the manuscript, so the choices made here may differ from the authors'. The support-free cross-scene results and the anchor ablation of the manuscript have not been reproduced with this code, and the PCA band projection for unseen sensors is not implemented.
 3. **Data split.** `train.py` and the default split of `demo_real.py` divide the labelled target pixels 50/50 per class into meta-training and meta-testing pools (no spatial separation); the manuscript's pool sizes and small-class rules are not reproduced. Episodes that would need more samples than a class has are skipped instead of sampled with replacement. The verified results use the geographic block split instead (`--split block`).
 4. **HDPM details.** Patch merging gives 81 / 16 / 4 tokens per level (manuscript ≈ 81 / 25 / 9); the spatial path takes the spectral path's output, so the paths run in sequence; the cross-path fusion adds a residual connection.
 5. **DSSPE details.** Graph diffusion uses the exact operator exp(−ηL) on the non-negative cosine graph of the initial prototypes; the graph contrastive loss uses an MLP encoder with feature-noise views and no edge dropout.

@@ -136,7 +136,8 @@ def main():
     tgt_te_x = torch.from_numpy(split["target_te_patches"])
     tgt_te_y = torch.from_numpy(split["target_te_labels"])
 
-    # Semantic anchors (random GloVe-like vectors; replace with real GloVe if available)
+    # Random placeholder anchors (Proj(.) is not trained here). Class-name
+    # embeddings are supported by scripts/demo_real.py (--class-embeddings).
     n_way = min(args.n_way, len(split["target_classes"]))
     anchors = torch.randn(len(split["target_classes"]), cfg.dsspe.anchor_glove_dim)  # one row per class
 

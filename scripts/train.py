@@ -265,8 +265,9 @@ def main():
         )
 
     n_way = min(args.n_way, n_target_classes)
-    # NOTE: placeholder anchors. GloVe class-name anchors are not implemented
-    # yet (see README, "Known differences from the manuscript").
+    # NOTE: random placeholder anchors, and Proj(.) is not trained here.
+    # Class-name embeddings are supported by scripts/demo_real.py
+    # (--class-embeddings); see README, "Class-name embeddings".
     anchors = torch.randn(n_target_classes, cfg.dsspe.anchor_glove_dim)  # one row per class
 
     # ------------------------------------------------------------------
