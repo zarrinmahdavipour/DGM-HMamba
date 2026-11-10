@@ -50,6 +50,7 @@ from dgm_hmamba.data import (
     split_validation,
 )
 from dgm_hmamba.data.datasets import CLASS_NAMES
+from dgm_hmamba.data.class_embeddings import load_class_embeddings
 from dgm_hmamba.episodes import ByClassIndex, gather_episode
 from dgm_hmamba.evaluation import evaluate_episodes, format_metrics
 from dgm_hmamba.losses import total_objective_stage1, total_objective_stage2
@@ -91,6 +92,7 @@ def demo_config(args):
         cfg.dsspe.T_p = 0
         cfg.loss.lambda_gcl = 0.0
     cfg.hdpm.encoder = args.encoder
+    cfg.dsspe.anchor_init = args.anchor_init
     cfg.loss.focal_gamma = args.focal_gamma
     return cfg
 
@@ -152,6 +154,17 @@ def parse_args():
     p.add_argument("--lambda-diff", type=float, default=None, help="default: config (0.5)")
     p.add_argument("--lambda-adv", type=float, default=None,
                    help="default: config (0.1); 0 removes the domain-adversarial alignment")
+    p.add_argument("--class-embeddings", default=None,
+                   help="JSON file of class-name embeddings (scripts/make_class_embeddings.py); "
+                        "without it the semantic anchors are random placeholder vectors")
+    p.add_argument("--lambda-sem", type=float, default=1.0,
+                   help="weight of L_sem, the Stage-1 loss that trains Proj(.) on the source classes "
+                        "(only with --class-embeddings)")
+    p.add_argument("--anchor-init", choices=["embedding", "feature", "none"], default="embedding",
+                   help="anchor rows: Proj(class-name embedding), initial prototypes, or no semantic term")
+    p.add_argument("--support-free", action="store_true",
+                   help="also classify the test region with the support-free rule argmax_k cos(f, s_k); "
+                        "meaningful only with --class-embeddings, and only label-free with --stage2-steps 0")
     p.add_argument("--static-prototypes", action="store_true",
                    help="ablation w/o Dyn: class-mean prototypes (T_p = 0) and no L_gcl")
     p.add_argument("--encoder", choices=["hdpm", "cnn"], default="hdpm",
@@ -459,6 +472,29 @@ def main():
                         test=split["target_te_coords"],
                         **({} if split["target_val_coords"] is None else {"val": split["target_val_coords"]}))
 
+    # ------------------------------------------------------ class-name anchors
+    src_anchors = None
+    anchor_info = {"kind": "placeholder", "note": "random vectors (no --class-embeddings); "
+                                                  "the semantic term carries no class-name information"}
+    if saved_run is not None:                   # --weights: the anchors are stored in the saved run
+        cfg.dsspe.anchor_glove_dim = int(saved_run["anchors"].shape[1])
+        if args.class_embeddings:
+            anchor_info = {"kind": "class-name embeddings (stored in the saved run)", "file": args.class_embeddings}
+    elif args.class_embeddings:
+        tnames = [CLASS_NAMES[tgt_ds.name][c - 1] for c in target_classes]
+        snames = [CLASS_NAMES[src_ds.name][c - 1] for c in split["source_classes"]]
+        t_emb, info = load_class_embeddings(args.class_embeddings, tgt_ds.name, tnames)
+        s_emb, s_info = load_class_embeddings(args.class_embeddings, src_ds.name, snames)
+        cfg.dsspe.anchor_glove_dim = int(t_emb.shape[1])
+        src_anchors = torch.from_numpy(s_emb).to(device)
+        anchor_info = {"kind": "class-name embeddings", **info, "source_oov": s_info["oov"]}
+        oov = {n: o for n, o in {**info["oov"], **s_info["oov"]}.items() if o}
+        print(f"  Class-name anchors: {info['embedding']} ({info['dim']}-d) from {args.class_embeddings}; "
+              f"Proj trained in Stage 1 with L_sem (λ_sem {args.lambda_sem:g})"
+              + (f"; out-of-vocabulary tokens: {oov}" if oov else ""))
+    elif saved_run is None:
+        print("  Class-name anchors: random placeholders (no --class-embeddings)")
+
     # ----------------------------------------------------------------- model
     model = DGMHMamba(cfg, src_ds.n_bands, tgt_ds.n_bands, len(split["source_classes"])).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -466,8 +502,10 @@ def main():
           f"(widths {cfg.hdpm.widths}, T={cfg.dadge.T}, {args.patch_size}×{args.patch_size} patches)")
     print(f"  Settings: {vars(args)}\n")
 
-    # Placeholder semantic anchors (GloVe class-name anchors not implemented yet)
-    anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
+    if args.class_embeddings and saved_run is None:
+        anchors = torch.from_numpy(t_emb)
+    else:   # placeholder semantic anchors (random; kept as before so that earlier runs are reproduced)
+        anchors = torch.randn(n_cls_t, cfg.dsspe.anchor_glove_dim)
     history = {"stage1": [], "stage2": [], "validation": {}}
     skipped = {"stage1": 0, "stage2": 0}   # updates skipped because the loss was not finite
     history["skipped_updates"] = skipped
@@ -522,8 +560,14 @@ def main():
         x0_t = model.project_bands(maybe_augment(tr_x[ti].to(device)), is_source=False)
 
         opt.zero_grad(set_to_none=True)
-        l_cls, l_diff, l_adv = model.stage1_losses(x0_s, src_y[si].to(device), x0_t, lambda_grl)
-        loss = total_objective_stage1(l_cls, l_diff, l_adv, cfg.loss)
+        if src_anchors is None:
+            l_cls, l_diff, l_adv = model.stage1_losses(x0_s, src_y[si].to(device), x0_t, lambda_grl)
+            l_sem = None
+            loss = total_objective_stage1(l_cls, l_diff, l_adv, cfg.loss)
+        else:
+            l_cls, l_diff, l_adv, l_sem = model.stage1_losses_with_semantics(
+                x0_s, src_y[si].to(device), x0_t, lambda_grl, src_anchors)
+            loss = total_objective_stage1(l_cls, l_diff, l_adv, cfg.loss) + args.lambda_sem * l_sem
         if not torch.isfinite(loss):
             skipped["stage1"] += 1
             continue
@@ -535,10 +579,12 @@ def main():
         history["stage1"].append({
             "iter": it, "lambda_grl": lambda_grl, "l_cls": l_cls.item(),
             "l_diff": l_diff.item(), "l_adv": l_adv.item(), "total": loss.item(),
+            **({} if l_sem is None else {"l_sem": l_sem.item()}),
         })
         if it == 1 or it % 20 == 0 or it == args.stage1_iters:
             print(f"  iter {it:4d} | λ_grl={lambda_grl:.2f} | L_cls={l_cls.item():.3f} "
-                  f"L_diff={l_diff.item():.3f} L_adv={l_adv.item():.3f}")
+                  f"L_diff={l_diff.item():.3f} L_adv={l_adv.item():.3f}"
+                  + ("" if l_sem is None else f" L_sem={l_sem.item():.3f}"))
     if ckpt is None:
         timings["stage1_s"] = time.time() - t0
         print(f"  Stage 1 done in {timings['stage1_s']:.0f} s")
@@ -870,6 +916,29 @@ def main():
             print(f"  transductive, support-separated queries: OA {100 * tso:.2f} ± {100 * tsos:.2f} %   "
                   f"AA {100 * tsa:.2f} ± {100 * tsas:.2f} %")
 
+    support_free = None
+    if args.support_free:
+        print("\nSupport-free classification of the test region: argmax_k cos(f, s_k), no support samples")
+        if not args.class_embeddings:
+            print("  skipped: the anchors are random placeholders (give --class-embeddings)")
+        else:
+            with torch.no_grad():
+                S = torch.nn.functional.normalize(model.dsspe.anchor_proj(anchors.to(device)), dim=-1).cpu()
+            f_te = torch.nn.functional.normalize(encode_pool(te_x), dim=-1)
+            pred_sf = (f_te @ S.t()).argmax(-1).numpy()
+            rep_sf = classification_report(te_y.numpy(), pred_sf, n_cls_t)
+            protocol = ("label-free: no target label was used for training" if args.stage2_steps == 0 else
+                        "NOT label-free: Stage 2 trained on labelled target episodes")
+            support_free = {"oa": rep_sf["oa"], "aa": rep_sf["aa"], "kappa": rep_sf["kappa"],
+                            "recall": rep_sf["per_class"], "precision": rep_sf["precision"],
+                            "confusion": rep_sf["confusion_matrix"], "protocol": protocol}
+            print(f"  OA {100 * rep_sf['oa']:.2f} %   AA {100 * rep_sf['aa']:.2f} %   κ {rep_sf['kappa']:.4f}   ({protocol})")
+            for i in range(n_cls_t):
+                r = rep_sf["per_class"][i]
+                print(f"  {cname(i):<22} recall {'–' if r is None else f'{100 * r:5.1f}'}")
+            print(f"RESULT support-free: OA {100 * rep_sf['oa']:.2f}  AA {100 * rep_sf['aa']:.2f}  "
+                  f"kappa {rep_sf['kappa']:.4f}  ({protocol})")
+
     timings["total_s"] = time.time() - t_all
 
     # --------------------------------------------------------------- outputs
@@ -894,6 +963,8 @@ def main():
                        "target_meta_test": len(te_y)},
         "episodic_metrics": metrics,
         "map_metrics": map_summary,
+        "anchors": anchor_info,
+        "support_free": support_free,
         "split_info": split["split_info"],
         "timings_s": timings,
         "history": history,

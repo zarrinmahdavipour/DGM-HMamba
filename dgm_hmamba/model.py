@@ -3,6 +3,7 @@
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .config import DGMHMambaConfig
 from .modules import BandProjection, DADGE, HDPM, DSSPE, graph_contrastive_loss
@@ -72,6 +73,31 @@ class DGMHMamba(nn.Module):
         x0_target_unlabeled: torch.Tensor,
         lambda_grl: float,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._stage1(x0_source, y_source, x0_target_unlabeled, lambda_grl)[:3]
+
+    def stage1_losses_with_semantics(
+        self,
+        x0_source: torch.Tensor,
+        y_source: torch.Tensor,
+        x0_target_unlabeled: torch.Tensor,
+        lambda_grl: float,
+        source_anchors: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Stage-1 losses plus L_sem, which trains Proj(.) on the source classes.
+
+        The manuscript trains Proj "on the source classes jointly with L_cls"
+        without giving the loss. Here L_sem is the cross-entropy of the scaled
+        cosine similarities between the source embeddings and the projected
+        class-name embeddings of all source classes, i.e. the support-free rule
+        argmax_k cos(f, s_k) applied to the labelled source scene.
+        source_anchors: (num_source_classes, glove_dim), rows in label order.
+        """
+        l_cls, l_diff, l_adv, f_source = self._stage1(x0_source, y_source, x0_target_unlabeled, lambda_grl)
+        S = F.normalize(self.dsspe.anchor_proj(source_anchors), dim=-1)
+        logits = self.cfg.dsspe.logit_scale * (F.normalize(f_source, dim=-1) @ S.t())
+        return l_cls, l_diff, l_adv, F.cross_entropy(logits, y_source)
+
+    def _stage1(self, x0_source, y_source, x0_target_unlabeled, lambda_grl):
         # Domain discriminator (GRL is active for L_adv)
         _, c_source = self.dadge.discriminator(x0_source, lambda_grl)
 
@@ -89,7 +115,7 @@ class DGMHMamba(nn.Module):
         # and the noise is perfectly predictable), destroying the input signal.
         l_diff = self.dadge.diffusion_loss(x0_source.detach(), c_for_diff)
         l_adv = self.dadge.adversarial_loss(x0_source, x0_target_unlabeled, lambda_grl)
-        return l_cls, l_diff, l_adv
+        return l_cls, l_diff, l_adv, f_source
 
     # ------------------------------------------------------------------
     # Stage 2

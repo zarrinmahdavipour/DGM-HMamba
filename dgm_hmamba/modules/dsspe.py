@@ -71,9 +71,13 @@ class DSSPE(nn.Module):
         P = P0
         bar_P = P0.clone()
 
-        # Semantic anchors S (Eq. semantic). Proj(.) is not updated during
-        # episodic training (the manuscript freezes it in Stage 2).
-        if semantic_anchors.shape[-1] != self.d_model:
+        # Semantic anchors S (Eq. semantic). Proj(.) is trained in Stage 1 on the
+        # source classes (when class-name embeddings are given) and is not
+        # updated during episodic training (the manuscript freezes it in Stage 2).
+        mode = getattr(self.cfg, "anchor_init", "embedding")
+        if mode == "feature":                  # s_k = P_k^(0)
+            S = P0.detach()
+        elif semantic_anchors.shape[-1] != self.d_model:
             with torch.no_grad():
                 S = self.anchor_proj(semantic_anchors)  # (N, d)
         else:
@@ -90,6 +94,8 @@ class DSSPE(nn.Module):
         diffusion = torch.matrix_exp(-self.cfg.eta_r * L)
 
         alphas = F.softmax(self.fusion_logits, dim=0)  # (3,)
+        if mode == "none":                     # w/o anchors: alpha_s = 0, (alpha_m, alpha_d) re-normalised
+            alphas = torch.cat([alphas[:2] / alphas[:2].sum(), alphas.new_zeros(1)])
 
         for r in range(self.cfg.T_p):
             # 1) Momentum (Eq. momentum)

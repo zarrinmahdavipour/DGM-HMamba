@@ -56,6 +56,10 @@ class DSSPEConfig:
     T_p: int = 5                              # PAPER: evolution steps
     alpha_init: Tuple[float, float, float] = (0.6, 0.2, 0.2)  # PAPER
     anchor_glove_dim: int = 300               # PAPER: GloVe dim
+    # Anchor rows S: "embedding" = Proj(class-name embedding) (PAPER default),
+    # "feature" = initial prototypes P^(0) (PAPER: feature-based initialisation),
+    # "none" = no semantic term, alpha_s = 0 with (alpha_m, alpha_d) re-normalised.
+    anchor_init: str = "embedding"
     contrastive_temp: float = 0.07            # PAPER: tau
 
     momentum_mu: float = 0.9

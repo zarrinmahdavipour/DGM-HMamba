@@ -66,6 +66,29 @@ jobs:
             --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \
             --q-query 2 --train-query 2 --val-episodes 2 --map-repeats 2 --no-diffusion \
             --encoder cnn --static-prototypes --lambda-adv 0 --lambda-diff 0
+          python - <<'PY'
+          import numpy as np, sys
+          sys.path.insert(0, ".")
+          from dgm_hmamba.data.class_embeddings import needed_tokens
+          from dgm_hmamba.data.datasets import CLASS_NAMES
+          rng = np.random.default_rng(0)
+          with open("fake_glove.txt", "w") as f:
+              for t in sorted(needed_tokens(CLASS_NAMES)):
+                  f.write(t + " " + " ".join(f"{x:.4f}" for x in rng.standard_normal(300)) + "\n")
+          PY
+          python scripts/make_class_embeddings.py --glove fake_glove.txt --out runs/fake_class_embeddings.json
+          python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_support_free \
+            --patch-size 5 --stage1-iters 3 --stage2-steps 0 --eval-episodes 2 --device cpu \
+            --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \
+            --q-query 2 --val-episodes 2 --map-repeats 2 --no-diffusion \
+            --class-embeddings runs/fake_class_embeddings.json --support-free
+          python - <<'PY'
+          import json
+          s = json.load(open("runs/ci_support_free/demo_summary.json"))
+          assert s["anchors"]["kind"] == "class-name embeddings" and s["support_free"]["protocol"].startswith("label-free")
+          assert "l_sem" in s["history"]["stage1"][-1]
+          print("class-name embeddings and support-free evaluation ran:", round(s["support_free"]["oa"], 3))
+          PY
           python scripts/demo_real.py --data-root data_synthetic --output-dir runs/ci_demo_geo2 \
             --patch-size 5 --stage1-iters 2 --stage2-steps 2 --eval-episodes 2 --device cpu \
             --split block --split-file runs/ci_demo_geo/split.json --norm train --n-way 3 --k-shot 1 \

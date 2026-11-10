@@ -353,3 +353,41 @@ def test_ablation_switches():
     total_objective_stage1(l_cls, l_diff, l_adv, m.cfg.loss).backward()
     g = m.target_band_proj.proj.weight.grad
     assert g is None or torch.count_nonzero(g) == 0
+
+
+def test_class_name_embeddings(tmp_path):
+    from dgm_hmamba.data.class_embeddings import (build_embedding_file, load_class_embeddings,
+                                                  needed_tokens, tokenize)
+    from dgm_hmamba.data.datasets import CLASS_NAMES
+
+    assert tokenize("Corn-notill") == ["corn", "no", "till"]
+    assert tokenize("Vinyard untrained") == ["vineyard", "untrained"]
+    assert tokenize("Lettuce romaine 4wk") == ["lettuce", "romaine", "four", "weeks"]
+    rng = np.random.default_rng(0)
+    vocab = {t: rng.standard_normal(8).astype(np.float32) for t in needed_tokens(CLASS_NAMES) if t != "till"}
+    doc = build_embedding_file(vocab, CLASS_NAMES, "fake", tmp_path / "emb.json")
+    assert doc["oov"]["indian_pines"]["Corn-notill"] == ["till"]          # out-of-vocabulary tokens are recorded
+    names = ["Meadows", "Asphalt"]
+    arr, info = load_class_embeddings(tmp_path / "emb.json", "pavia_u", names)
+    assert arr.shape == (2, 8) and np.allclose(arr[1], vocab["asphalt"], atol=1e-5)
+    assert np.allclose(load_class_embeddings(tmp_path / "emb.json", "pavia_u", ["Painted metal sheets"])[0][0],
+                       np.mean([vocab["painted"], vocab["metal"], vocab["sheets"]], 0), atol=1e-5)
+
+
+def test_semantic_anchor_projection_and_modes():
+    torch.manual_seed(0)
+    m = DGMHMamba(tiny_cfg(), source_bands=12, target_bands=8, num_source_classes=4)
+    xs = m.project_bands(torch.randn(4, 12, 5, 5), is_source=True)
+    xt = m.project_bands(torch.randn(4, 8, 5, 5), is_source=False)
+    src_anchors = torch.randn(4, m.cfg.dsspe.anchor_glove_dim)
+    l_cls, l_diff, l_adv, l_sem = m.stage1_losses_with_semantics(xs, torch.tensor([0, 1, 2, 3]), xt, 1.0, src_anchors)
+    l_sem.backward()
+    assert m.dsspe.anchor_proj.weight.grad is not None                    # Proj is trained in Stage 1
+    f = torch.randn(6, m.cfg.hdpm.widths[-1])
+    sy = torch.arange(3).repeat_interleave(2)
+    a1, a2 = torch.randn(3, m.cfg.dsspe.anchor_glove_dim), torch.randn(3, m.cfg.dsspe.anchor_glove_dim)
+    assert not torch.allclose(m.dsspe.evolve(f, sy, 3, a1), m.dsspe.evolve(f, sy, 3, a2))
+    for mode in ("feature", "none"):                                       # anchors from features / no semantic term
+        m.dsspe.cfg.anchor_init = mode
+        assert torch.allclose(m.dsspe.evolve(f, sy, 3, a1), m.dsspe.evolve(f, sy, 3, a2))
+    m.dsspe.cfg.anchor_init = "embedding"
