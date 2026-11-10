@@ -83,13 +83,14 @@ On Windows the scripts switch the console to UTF-8 themselves, so no `PYTHONIOEN
 
 ## Class-name embeddings (semantic anchors)
 
-**Status.** The manuscript initialises each DSSPE anchor from the 300-d GloVe vector of the class name, s_k = Proj(e_k), trains Proj on the source classes in Stage 1, and uses the same anchors for *label-free, support-free cross-scene* classification, ŷ = argmax_k cos(f, s_k) (its cross-scene table and the support-free column of its anchor ablation). Up to release `verified-ip2pu-v1` the code had **no class-name embeddings**: every script used random placeholder vectors and Proj was never trained. Those experiments therefore **cannot be reproduced from this repository**, and they have not been reproduced with the code added since. All verified results above use the random placeholders.
+**Status.** The manuscript initialises each DSSPE anchor from the 300-d GloVe vector of the class name, s_k = Proj(e_k), trains Proj on the source classes in Stage 1, and uses the same anchors for *label-free, support-free cross-scene* classification, ŷ = argmax_k cos(f, s_k) (its cross-scene table and the support-free column of its anchor ablation). Until 10 November 2026 the code had **no class-name embeddings**: every script used random placeholder vectors and Proj was never trained. Those experiments therefore **cannot be reproduced from this repository**, and they have not been reproduced with the code added since. All verified results above use the random placeholders.
 
 **What the code now provides.** `--class-embeddings FILE` loads one vector per class name; Stage 1 then trains Proj with an additional loss L_sem, Proj is frozen in Stage 2, and `--support-free` evaluates the support-free rule on the test region (label-free only together with `--stage2-steps 0`). `--anchor-init {embedding,feature,none}` selects the manuscript's three anchor variants (embedding-based, feature-based s_k = P_k^(0), and no semantic term with α_s = 0).
 
+`class_embeddings/glove.6B.300d.json` is included: the 300-d [GloVe 6B](https://nlp.stanford.edu/projects/glove/) vectors (Public Domain Dedication and License) of the class names of all five scenes, built by `.github/workflows/class-embeddings.yml` (73 of 75 tokens found; "windrowed" and "senesced" are out of vocabulary, so "Hay-windrowed" and "Corn senesced green weeds" rest on their other words).
+
 ```bash
-# GloVe 6B (https://nlp.stanford.edu/projects/glove/, Public Domain Dedication and License)
-python scripts/make_class_embeddings.py --glove glove.6B.300d.txt --out class_embeddings/glove.6B.300d.json
+# rebuild from another GloVe file: python scripts/make_class_embeddings.py --glove glove.6B.300d.txt --out class_embeddings/glove.6B.300d.json
 python scripts/demo_real.py --download --preset verified --class-embeddings class_embeddings/glove.6B.300d.json
 python scripts/demo_real.py --download --preset verified --stage2-steps 0 \
     --class-embeddings class_embeddings/glove.6B.300d.json --support-free      # no target label used
@@ -186,6 +187,7 @@ scripts/
   demo_real.py       real-data runs (Indian Pines -> Pavia University), --preset verified, --weights
   make_splits.py     writes the block assignments in splits/
   make_class_embeddings.py   builds the class-name embedding file from a GloVe text file
+class_embeddings/    GloVe 6B 300-d vectors of the class names (semantic anchors)
   prepare_data.py    download / check datasets
   train.py           full two-stage training and evaluation (pixel-level pools)
   train_cross_domain.py   lighter training script
