@@ -348,14 +348,14 @@ def _set_rng_state(state: dict, rng: random.Random) -> None:
 def main():
     use_utf8_stdout()
     args = parse_args()
-    saved = None
+    saved_run = None
     if args.weights:
-        saved = torch.load(args.weights, map_location="cpu", weights_only=False)
-        for k, v in saved["args"].items():
+        saved_run = torch.load(args.weights, map_location="cpu", weights_only=False)
+        for k, v in saved_run["args"].items():
             if k not in WEIGHTS_KEEP:
                 setattr(args, k, v)
         args.stop_after, args.resume = 0, None
-        print(f"Evaluating saved weights {args.weights} (selected episode {saved.get('selected_episode')}); "
+        print(f"Evaluating saved weights {args.weights} (selected episode {saved_run.get('selected_episode')}); "
               f"settings and split taken from that run, training skipped.")
     set_seed(args.seed)
     device = torch.device(args.device)
@@ -472,9 +472,9 @@ def main():
     skipped = {"stage1": 0, "stage2": 0}   # updates skipped because the loss was not finite
     history["skipped_updates"] = skipped
     ckpt = None
-    if saved is not None:                       # --weights: evaluate a saved run
-        model.load_state_dict(saved["model"])
-        anchors = saved["anchors"]
+    if saved_run is not None:                       # --weights: evaluate a saved run
+        model.load_state_dict(saved_run["model"])
+        anchors = saved_run["anchors"]
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         if ckpt["args"] != _resume_args(args):
@@ -506,7 +506,7 @@ def main():
     print(f"STAGE 1 – source pre-training + domain-adversarial diffusion ({args.stage1_iters} iters)")
     print("=" * 64)
     opt = AdamW(model.parameters(), lr=cfg.stage1_lr, weight_decay=cfg.weight_decay)
-    stage1_iters = 0 if (ckpt is not None or saved is not None) else args.stage1_iters   # resumed or --weights
+    stage1_iters = 0 if (ckpt is not None or saved_run is not None) else args.stage1_iters   # resumed or --weights
     warmup = max(1, int(0.15 * args.stage1_iters))   # paper: λ_grl ramps over 30 of 200 epochs
     lr_warm1 = int(args.warmup_frac * args.stage1_iters)
     gen = torch.Generator().manual_seed(args.seed)
@@ -561,7 +561,7 @@ def main():
     best = (-1.0, None, 0)
     ema_model = copy.deepcopy(model) if args.ema > 0 else None
     start, stage2_before = 1, 0.0
-    if saved is not None:
+    if saved_run is not None:
         start = args.stage2_steps + 1           # --weights: no training
     if ckpt is not None:
         model.load_state_dict(ckpt["model"])
@@ -640,7 +640,7 @@ def main():
     if args.select_on_val and best[1] is not None:
         model.load_state_dict(best[1])
         print(f"  using the checkpoint from episode {best[2]} (best validation OA {best[0]*100:.2f}%)")
-    history["selected_episode"] = best[2] if saved is None else saved.get("selected_episode")
+    history["selected_episode"] = best[2] if saved_run is None else saved_run.get("selected_episode")
     n_tail = max(1, len(history["stage2"]) // 10)
     history["train_acc_last10pct"] = (float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
                                       if history["stage2"] else float("nan"))
