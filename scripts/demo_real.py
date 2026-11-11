@@ -867,6 +867,8 @@ def main():
                     pred_map = np.zeros(tgt_ds.gt.shape, dtype=np.int64)
                     pred_map[coords[:, 0], coords[:, 1]] = preds + 1
         timings["map_s"] = time.time() - t0
+        np.save(out_dir / "pred_map_draw1.npy", pred_map)                       # paper figure (branch only)
+        np.save(out_dir / "false_colour.npy", false_colour(tgt_ds.data).astype(np.float16))
 
         mean_sd = lambda key: (float(np.mean([r[key] for r in reps])),
                                float(np.std([r[key] for r in reps], ddof=1)) if len(reps) > 1 else 0.0)
