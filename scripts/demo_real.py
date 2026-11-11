@@ -169,6 +169,10 @@ def parse_args():
                    help="ablation w/o Dyn: class-mean prototypes (T_p = 0) and no L_gcl")
     p.add_argument("--encoder", choices=["hdpm", "cnn"], default="hdpm",
                    help="ablation w/ CNN: replace HDPM by a residual 3-D CNN")
+    p.add_argument("--target-train-per-class", type=int, default=0,
+                   help="label budget: keep N labelled pixels per class of P_t^tr for Stage 2 (0 = all). "
+                        "The subset depends only on the split seed and is nested (10 is inside 50). "
+                        "Stage-1 alignment still uses the whole unlabelled training region")
     p.add_argument("--focal-gamma", type=float, default=0.0,
                    help="focal modulation of the episodic loss (0 = plain cross-entropy)")
     p.add_argument("--ddim", action="store_true",
@@ -480,6 +484,21 @@ def main():
     print(f"          {'total':<22}" + "".join(f"{len(v):>8} {100.0:5.1f}%" for v in pools.values() if v is not None))
     si["pool_class_counts"] = {k: np.bincount(v, minlength=n_cls_t).tolist()
                                for k, v in pools.items() if v is not None}
+    tr_x_unlab = tr_x                       # Stage 1: unlabelled training-region pixels for alignment
+    if args.target_train_per_class > 0:
+        n_keep = args.target_train_per_class
+        need = args.k_shot + (args.train_query or args.q_query)
+        if n_keep < need:
+            raise SystemExit(f"--target-train-per-class {n_keep} < k_shot + train_query = {need}")
+        rs_budget = np.random.RandomState(1_000_003 * split_seed + 17)   # same subset for every arm
+        y_np = tr_y.numpy()
+        keep = np.concatenate([rs_budget.permutation(np.where(y_np == c)[0])[:n_keep] for c in range(n_cls_t)])
+        keep = torch.as_tensor(np.sort(keep), dtype=torch.long)
+        tr_x, tr_y = tr_x[keep], tr_y[keep]
+        si["stage2_label_budget"] = n_keep
+        si["stage2_class_counts"] = np.bincount(tr_y.numpy(), minlength=n_cls_t).tolist()
+        print(f"  Stage-2 label budget: {n_keep} per class -> {len(tr_y)} labelled pixels "
+              f"{si['stage2_class_counts']} (alignment pool unchanged: {len(tr_x_unlab)})")
     with open(out_dir / "split.json", "w", encoding="utf-8") as f:
         json.dump({"split_info": si, "seeds": {"model": args.seed, "split": split_seed, "eval": eval_seed},
                    "source": args.source, "target": args.target}, f, indent=1)
@@ -570,9 +589,9 @@ def main():
         for g in opt.param_groups:
             g["lr"] = cfg.stage1_lr * lr_factor(it, args.stage1_iters, lr_warm1, args.schedule)
         si = torch.randint(len(src_y), (args.batch_size,), generator=gen)
-        ti = torch.randint(len(tr_y), (args.batch_size,), generator=gen)   # unlabeled target
+        ti = torch.randint(len(tr_x_unlab), (args.batch_size,), generator=gen)   # unlabeled target
         x0_s = model.project_bands(maybe_augment(src_x[si].to(device)), is_source=True)
-        x0_t = model.project_bands(maybe_augment(tr_x[ti].to(device)), is_source=False)
+        x0_t = model.project_bands(maybe_augment(tr_x_unlab[ti].to(device)), is_source=False)
 
         opt.zero_grad(set_to_none=True)
         if src_anchors is None:
