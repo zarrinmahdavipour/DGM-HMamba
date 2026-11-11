@@ -21,10 +21,14 @@ MAP, EPI = "map_oa", "test5_oa"          # H1, H5 on the whole-scene map; H2-H4 
 BUDGET = {"c7": 10, "c8": 50, "c9": 10, "c10": 50, "c13": 50, "c17": 50}
 
 
+CONFIRMATORY = range(10, 100)             # partitions 1-9 are development data and never enter F1-F10
+CONFIRM_WAVES = {"w1", "w2", "w3", "w4", "w5", "g0"}   # g0 holds the feasibility runs of arm c1 on 10-19
+
+
 def load(path):
     data = defaultdict(dict)              # (arm, task) -> {partition: row}
     for r in csv.DictReader(open(path, encoding="utf-8")):
-        if r.get("arm_id"):
+        if r.get("arm_id") and int(r["partition"]) in CONFIRMATORY and r.get("wave") in CONFIRM_WAVES:
             data[(r["arm_id"], r["task"])][int(r["partition"])] = r
     return data
 
