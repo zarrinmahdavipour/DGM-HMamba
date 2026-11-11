@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import logx  # noqa: E402
 
 BRANCH = re.compile(r"^(exp|long)/lb-([a-z]+\d+)-([a-z]\d+)-(t\d)-g(\d+)$")
-EXTRA = ["wave", "arm_id", "task", "partition", "budget", "stage2_total", "stage2_min", "split_mode"]
+EXTRA = ["wave", "arm_id", "task", "partition", "budget", "stage2_total", "stage2_min", "split_mode",
+         "subset_fp", "prefix10_fp", "prefix50_fp", "checkpoint", "cpu", "stage2_s"]
 
 
 def lb_branches():
@@ -51,6 +52,26 @@ def parse(branch, blind):
         counts = sp.get("stage2_class_counts")
         if counts:
             row["stage2_total"], row["stage2_min"] = sum(counts), min(counts)
+        row["subset_fp"] = sp.get("stage2_subset_fingerprint")
+        pre = sp.get("stage2_prefix_fingerprints") or {}
+        row["prefix10_fp"], row["prefix50_fp"] = pre.get(10), pre.get(50)
+    # Checkpoint actually evaluated: the explicit line (lb-v1 onwards), else whether a best checkpoint was loaded.
+    m = logx.last(r"^\S+Z\s+checkpoint evaluated: (.*)$", text)
+    if m:
+        row["checkpoint"] = "last" if m.group(1).startswith("last") else "selected"
+    else:
+        row["checkpoint"] = "selected" if re.search(r"using the checkpoint from episode", text) else "last"
+    # CPU model of every job that ran the script (two-part runs can land on two machines).
+    cpus = []
+    for hm in re.finditer(r"^\S+Z\s+Hardware: (\{.*\})\s*$", text, flags=re.M):
+        hw = logx.lit(hm.group(1)) or {}
+        if hw.get("cpu") and hw["cpu"] not in cpus:
+            cpus.append(hw["cpu"])
+    row["cpu"] = " | ".join(cpus) or None
+    m = logx.last(r"^\S+Z RESULT params \d+ \| timings (\{.*\})\s*$", text)
+    tm = logx.lit(m.group(1)) if m else None
+    if tm:
+        row["stage2_s"] = tm.get("stage2_s")
     return row
 
 

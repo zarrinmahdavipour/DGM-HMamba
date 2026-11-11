@@ -140,6 +140,31 @@ def integrity(path):
             fp[(r["task"], r["partition"])].add(r["index_fingerprint"])
     mixed = [k for k, v in fp.items() if len(v) > 1]
     print(f"| (task, partition) with more than one block-split fingerprint | {len(mixed)} {mixed[:10]} |")
+    # Nested and shared label subsets (block-split arms only; the leaky arms draw from a different pool).
+    by_tp = defaultdict(lambda: {"10": set(), "50": set()})
+    for r in rows:
+        if r.get("split_mode") != "block" or not r.get("subset_fp"):
+            continue
+        k = (r["task"], r["partition"])
+        b = val(r, "budget")
+        if b == 10:
+            by_tp[k]["10"].add(r["subset_fp"])
+        elif b == 50:
+            by_tp[k]["50"].add(r["subset_fp"])
+            if r.get("prefix10_fp"):
+                by_tp[k]["10"].add(r["prefix10_fp"])
+    bad_nest = [k for k, v in by_tp.items() if len(v["10"]) > 1 or len(v["50"]) > 1]
+    print(f"| (task, partition) whose 10- or 50-pixel subsets differ across arms or are not nested | {len(bad_nest)} {bad_nest[:10]} |")
+    print(f"| (task, partition) with nesting evidence (10-subset seen in a 50-pixel run) | "
+          f"{sum(1 for v in by_tp.values() if v['10'] and v['50'])} |")
+    want_sel = {a for a in ("c4", "c5", "c6", "c14", "m1", "m3", "m4", "m5", "m6")} | {f"u{i}{j}" for i in "12" for j in "124"}
+    wrong_ckpt = [r["branch"] for r in rows if r.get("checkpoint") and r.get("arm_id") and
+                  (r["checkpoint"] == "selected") != (r["arm_id"] in want_sel)]
+    print(f"| Runs whose evaluated checkpoint (last vs selected) does not match the arm | {len(wrong_ckpt)} {wrong_ckpt[:10]} |")
+    cpus = defaultdict(int)
+    for r in rows:
+        cpus[r.get("cpu") or "not logged"] += 1
+    print(f"| CPU models | {dict(cpus)} |")
     grid = defaultdict(set)
     for r in rows:
         grid[(r["arm_id"], r["task"])].add(int(r["partition"]))

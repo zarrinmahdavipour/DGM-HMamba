@@ -377,6 +377,24 @@ def _set_rng_state(state: dict, rng: random.Random) -> None:
     rng.setstate(state["episode_rng"])
 
 
+def hardware_info() -> dict:
+    """CPU model and thread settings, so timings and run-to-run differences can be traced to hardware."""
+    import os
+    import platform
+    cpu = None
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("model name"):
+                    cpu = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    return {"cpu": cpu or platform.processor() or platform.machine(), "logical_cpus": os.cpu_count(),
+            "torch_threads": torch.get_num_threads(), "torch": torch.__version__,
+            "python": platform.python_version()}
+
+
 def main():
     use_utf8_stdout()
     args = parse_args()
@@ -430,6 +448,8 @@ def main():
     if args.split_file:
         split["split_info"]["split_file"] = args.split_file
     print(f"  Seeds: model {args.seed}, split {split_seed}, evaluation {eval_seed}")
+    hardware = hardware_info()
+    print(f"  Hardware: {hardware}")
 
     src_x = torch.from_numpy(split["source_patches"])
     src_y = torch.from_numpy(split["source_labels"])
@@ -490,15 +510,26 @@ def main():
         need = args.k_shot + (args.train_query or args.q_query)
         if n_keep < need:
             raise SystemExit(f"--target-train-per-class {n_keep} < k_shot + train_query = {need}")
+        import hashlib
         rs_budget = np.random.RandomState(1_000_003 * split_seed + 17)   # same subset for every arm
         y_np = tr_y.numpy()
-        keep = np.concatenate([rs_budget.permutation(np.where(y_np == c)[0])[:n_keep] for c in range(n_cls_t)])
-        keep = torch.as_tensor(np.sort(keep), dtype=torch.long)
+        perms = [rs_budget.permutation(np.where(y_np == c)[0]) for c in range(n_cls_t)]
+
+        def subset_fingerprint(n):
+            # positions within P_t^tr (whose identity is the split's index_fingerprint)
+            idx = np.sort(np.concatenate([q[:n] for q in perms])).astype(np.int64)
+            return hashlib.sha1(idx.tobytes()).hexdigest()[:16]
+
+        keep = torch.as_tensor(np.sort(np.concatenate([q[:n_keep] for q in perms])), dtype=torch.long)
         tr_x, tr_y = tr_x[keep], tr_y[keep]
         si["stage2_label_budget"] = n_keep
         si["stage2_class_counts"] = np.bincount(tr_y.numpy(), minlength=n_cls_t).tolist()
+        si["stage2_subset_fingerprint"] = subset_fingerprint(n_keep)
+        # Nested budgets: the first n pixels per class of this subset must equal the n-per-class subset.
+        si["stage2_prefix_fingerprints"] = {n: subset_fingerprint(n) for n in (10, 50) if n <= n_keep}
         print(f"  Stage-2 label budget: {n_keep} per class -> {len(tr_y)} labelled pixels "
-              f"{si['stage2_class_counts']} (alignment pool unchanged: {len(tr_x_unlab)})")
+              f"{si['stage2_class_counts']} (alignment pool unchanged: {len(tr_x_unlab)}); "
+              f"subset {si['stage2_subset_fingerprint']}, prefixes {si['stage2_prefix_fingerprints']}")
     with open(out_dir / "split.json", "w", encoding="utf-8") as f:
         json.dump({"split_info": si, "seeds": {"model": args.seed, "split": split_seed, "eval": eval_seed},
                    "source": args.source, "target": args.target}, f, indent=1)
@@ -721,11 +752,25 @@ def main():
     if args.select_on_val and best[1] is not None:
         model.load_state_dict(best[1])
         print(f"  using the checkpoint from episode {best[2]} (best validation OA {best[0]*100:.2f}%)")
-    history["selected_episode"] = best[2] if saved_run is None else saved_run.get("selected_episode")
+    if saved_run is None:
+        if args.select_on_val and best[1] is not None:
+            checkpoint = f"episode {best[2]}, selected on validation"
+        elif args.select_on_val:
+            checkpoint = f"last (episode {args.stage2_steps}), also the best on validation"
+        else:
+            checkpoint = "last (no checkpoint selection)"
+        # "selected_episode" now names the checkpoint actually evaluated; the best validation episode is kept
+        # separately because it is reported even when nothing was selected.
+        history["selected_episode"] = best[2] if args.select_on_val else "last"
+        history["best_validation_episode"] = best[2]
+        history["checkpoint_used"] = checkpoint
+        print(f"  checkpoint evaluated: {checkpoint}")
+    else:
+        history["selected_episode"] = saved_run.get("selected_episode")
     n_tail = max(1, len(history["stage2"]) // 10)
     history["train_acc_last10pct"] = (float(np.mean([h["acc"] for h in history["stage2"][-n_tail:]]))
                                       if history["stage2"] else float("nan"))
-    torch.save({"model": model.state_dict(), "anchors": anchors, "selected_episode": best[2],
+    torch.save({"model": model.state_dict(), "anchors": anchors, "selected_episode": history["selected_episode"],
                 "args": vars(args)}, out_dir / "model_final.pt")
     print()
 
@@ -1011,6 +1056,7 @@ def main():
         "seeds": {"model": args.seed, "split": split_seed, "eval": eval_seed},
         "device": str(device),
         "torch": torch.__version__,
+        "hardware": hardware,
         "trainable_parameters": n_params,
         "pool_sizes": {"source": len(src_y), "target_meta_train": len(tr_y),
                        "target_validation": 0 if val_y is None else len(val_y),
