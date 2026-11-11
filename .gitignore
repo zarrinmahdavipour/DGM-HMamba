@@ -26,3 +26,6 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# Downloaded GitHub Actions job logs (analysis/lb_extract.py fetch)
+/analysis/logs/

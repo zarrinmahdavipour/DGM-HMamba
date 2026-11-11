@@ -17,15 +17,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import logx  # noqa: E402
 
-BRANCH = re.compile(r"^(exp|long)/lb-(w\d+)-([a-z]\d+)-(t\d)-g(\d+)$")
+BRANCH = re.compile(r"^(exp|long)/lb-([a-z]+\d+)-([a-z]\d+)-(t\d)-g(\d+)$")
 EXTRA = ["wave", "arm_id", "task", "partition", "budget", "stage2_total", "stage2_min", "split_mode"]
 
 
 def lb_branches():
-    rc, out, err = logx.gh("api", "--paginate", f"repos/{logx.REPO}/branches", "-q", ".[].name")
-    if rc:
-        sys.exit(err)
-    return sorted(b for b in out.split() if BRANCH.match(b))
+    # Explicit page numbers: --paginate follows links of the form repositories/{id}/..., which some
+    # proxies refuse.
+    names, page = [], 1
+    while True:
+        rc, out, err = logx.gh("api", f"repos/{logx.REPO}/branches?per_page=100&page={page}", "-q", ".[].name")
+        if rc:
+            sys.exit(err)
+        got = out.split()
+        names += got
+        if len(got) < 100:
+            break
+        page += 1
+    return sorted(b for b in names if BRANCH.match(b))
 
 
 def parse(branch, blind):
